@@ -46,7 +46,19 @@ impl Daemon {
 
     /// Like [`Daemon::start_on`] with extra `podd` arguments.
     pub fn start_with(pipe: String, state_dir: PathBuf, extra: &[&str]) -> Self {
+        Self::start_full(pipe, state_dir, extra, &[])
+    }
+
+    /// A fresh daemon with extra environment variables (e.g. `POD_FORGE`).
+    pub fn start_env(tag: &str, env: &[(&str, &str)]) -> Self {
+        let name = unique(tag);
+        let state_dir = std::env::temp_dir().join(&name);
+        Self::start_full(format!(r"\\.\pipe\{name}"), state_dir, &[], env)
+    }
+
+    pub fn start_full(pipe: String, state_dir: PathBuf, extra: &[&str], env: &[(&str, &str)]) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_podd"))
+            .envs(env.iter().copied())
             .args(extra)
             .args([
                 "--pipe",
@@ -63,6 +75,8 @@ impl Daemon {
             .env("NO_COLOR", "1")
             .env("CLAUDECODE", "1")
             .env("ORCA_TERMINAL_HANDLE", "term_test")
+            // Never the user's real %APPDATA%\Pod\mods.
+            .env("POD_MODS_DIR", state_dir.join("extensions"))
             .stdin(Stdio::null())
             .spawn()
             .expect("spawn podd");

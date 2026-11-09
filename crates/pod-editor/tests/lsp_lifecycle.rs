@@ -261,3 +261,174 @@ fn rust_analyzer_smoke() {
     assert!(p.exited());
     let _ = which("rust-analyzer");
 }
+
+/// `workspace/applyEdit` from a command: the request reaches the owner as
+/// `ServerEvent::ApplyEdit`, and the server gets the owner's answer.
+#[test]
+fn server_apply_edit_is_forwarded_and_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("a.rs");
+    std::fs::write(&file, "fn a() {}\n").unwrap();
+    let (exe, cfg) = fake_cfg(&[]);
+    let (tx, mut rx) = unbounded();
+    let p = ServerProcess::spawn(&exe, &cfg, &root, tx, 1).unwrap();
+    block(initialize(&p.client, &root, None)).unwrap();
+    let uri = path_to_uri_string(&file);
+    for applied in [true, false] {
+        let done = p.client.request("workspace/executeCommand", json!({"command": "fake.insertHeader", "arguments": [uri]}));
+        let ev = next_event(&mut rx, 10, |e| matches!(e, ServerEvent::ApplyEdit { .. })).expect("applyEdit forwarded");
+        let ServerEvent::ApplyEdit { params, reply } = ev else { unreachable!() };
+        let edit: lt::ApplyWorkspaceEditParams = serde_json::from_value(params).unwrap();
+        assert_eq!(edit.label.as_deref(), Some("fake header"));
+        assert_eq!(edit.edit.changes.unwrap().values().next().unwrap()[0].new_text, "// header\n");
+        reply.send(applied);
+        let answer = block(done).expect("executeCommand answered");
+        assert_eq!(answer["applied"], applied, "server saw the editor's answer");
+    }
+    block(p.shutdown(timer(3)));
+}
+
+/// Text edits of a code action's workspace edit for one file (editor
+/// columns: rust-analyzer negotiates UTF-32 with Pod).
+fn edits_for(we: &lt::WorkspaceEdit, uri: &str) -> Vec<lt::TextEdit> {
+    // Servers spell URIs their own way (`file:///c%3A/...`): compare paths.
+    let want = uri_str_to_path(uri);
+    let same = |u: &str| uri_str_to_path(u) == want;
+    let mut out = Vec::new();
+    if let Some(ch) = &we.changes {
+        for (u, e) in ch {
+            if same(u.as_str()) {
+                out.extend(e.iter().cloned());
+            }
+        }
+    }
+    let docs: Vec<&lt::TextDocumentEdit> = match &we.document_changes {
+        Some(lt::DocumentChanges::Edits(v)) => v.iter().collect(),
+        Some(lt::DocumentChanges::Operations(v)) => v.iter().filter_map(|o| if let lt::DocumentChangeOperation::Edit(e) = o { Some(e) } else { None }).collect(),
+        None => vec![],
+    };
+    for d in docs.into_iter().filter(|d| same(d.text_document.uri.as_str())) {
+        out.extend(d.edits.iter().map(|e| match e {
+            lt::OneOf::Left(t) => t.clone(),
+            lt::OneOf::Right(a) => a.text_edit.clone(),
+        }));
+    }
+    out
+}
+
+/// Code actions and completion extras against a real rust-analyzer on the
+/// fixture repository (docs/13 §7): the "Import `HashMap`" quick fix
+/// (resolved lazily), an auto-import completion whose `additionalTextEdits`
+/// come from `completionItem/resolve`, and snippet tab stops of a call
+/// completion. Ignored by default (CPU heavy); run with
+/// `cargo test -p pod-editor --test lsp_lifecycle rust_analyzer_code_actions -- --ignored`.
+#[test]
+#[ignore]
+fn rust_analyzer_code_actions() {
+    use pod_editor::lsp::snippet::Snippet;
+    use pod_editor::lsp::store::{apply_edits, completion_extra};
+    let Some(exe) = ra_available() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let root = pod_editor::fixture::create(&dir.path().join("demo repo"), false).unwrap();
+    let root = pod_editor::uri::simplify(&root.canonicalize().unwrap());
+    let main = root.join("src").join("main.rs");
+    let mut text = std::fs::read_to_string(&main).unwrap().replace("\r\n", "\n");
+    text.push_str("\nfn pod_imports() -> usize {\n    let m: HashMap<u8, u8> = HashMap::new();\n    m.len()\n}\n\nfn pod_complete() {\n    let _s = BTreeS\n}\n\nfn pod_call() {\n    let _n = word_c\n}\n");
+    std::fs::write(&main, &text).unwrap();
+    let cfg = ServerRegistry::default().for_language("rust").cloned().unwrap();
+    let (tx, mut rx) = unbounded();
+    let p = ServerProcess::spawn(&exe, &cfg, &root, tx, 1).unwrap();
+    let init = block(initialize(&p.client, &root, None)).expect("initialize");
+    assert_eq!(init.encoding, PosEncoding::Utf32);
+    let uri = path_to_uri_string(&main);
+    p.client.notify("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"rust","version":0,"text":text}})).unwrap();
+    let diags = wait_diag_for(&mut rx, &main, 180).unwrap_or_default();
+    eprintln!("diagnostics: {:?}", diags.iter().map(|d| d.message.as_str()).collect::<Vec<_>>());
+
+    // 1. Quick fix: import HashMap.
+    let line = text.lines().position(|l| l.contains("HashMap::new()")).unwrap() as u32;
+    let col = text.lines().nth(line as usize).unwrap().find("HashMap::new").unwrap() as u32 + 2;
+    let range = json!({"start":{"line":line,"character":col},"end":{"line":line,"character":col}});
+    let overlapping: Vec<&lt::Diagnostic> = diags.iter().filter(|d| d.range.start.line <= line && line <= d.range.end.line).collect();
+    let t = Instant::now();
+    let action = loop {
+        let v = block(p.client.request("textDocument/codeAction", json!({"textDocument":{"uri":uri},"range":range,"context":{"diagnostics":overlapping}})));
+        let actions: Vec<lt::CodeActionOrCommand> = v.ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let hit = actions.into_iter().find_map(|a| match a {
+            lt::CodeActionOrCommand::CodeAction(a) if a.title.contains("Import") && a.title.contains("HashMap") => Some(a),
+            _ => None,
+        });
+        if let Some(a) = hit {
+            break a;
+        }
+        assert!(t.elapsed() < Duration::from_secs(120), "no import action");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    eprintln!("code action: {:?} (edit inline: {})", action.title, action.edit.is_some());
+    let action = if action.edit.is_none() {
+        let v = block(p.client.request("codeAction/resolve", serde_json::to_value(&action).unwrap())).expect("resolve");
+        serde_json::from_value::<lt::CodeAction>(v).unwrap()
+    } else {
+        action
+    };
+    let fixed = apply_edits(&text, &edits_for(action.edit.as_ref().expect("edit"), &uri));
+    assert!(fixed.contains("use std::collections::HashMap;"), "{fixed}");
+    assert!(fixed.contains("let m: HashMap<u8, u8> = HashMap::new();"), "the rest stays");
+
+    // 2. Auto-import completion: `BTreeS` → BTreeSet, its `use` from resolve.
+    let line = text.lines().position(|l| l.contains("let _s = BTreeS")).unwrap() as u32;
+    let col = text.lines().nth(line as usize).unwrap().len() as u32;
+    let at = json!({"textDocument":{"uri":uri},"position":{"line":line,"character":col},"context":{"triggerKind":1}});
+    let t = Instant::now();
+    let item = loop {
+        let v = block(p.client.request("textDocument/completion", at.clone())).unwrap_or(Value::Null);
+        let items = match serde_json::from_value::<lt::CompletionResponse>(v) {
+            Ok(lt::CompletionResponse::Array(v)) => v,
+            Ok(lt::CompletionResponse::List(l)) => l.items,
+            Err(_) => vec![],
+        };
+        if let Some(i) = items.into_iter().find(|i| i.label.starts_with("BTreeSet")) {
+            break i;
+        }
+        assert!(t.elapsed() < Duration::from_secs(120), "no BTreeSet completion");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    eprintln!("completion: {:?} additional inline: {}", item.label, item.additional_text_edits.is_some());
+    let extra = completion_extra(&item, true).expect("auto-import extra");
+    let additional = match extra.resolve {
+        Some(orig) => {
+            let v = block(p.client.request("completionItem/resolve", serde_json::to_value(&orig).unwrap())).expect("resolve");
+            serde_json::from_value::<lt::CompletionItem>(v).unwrap().additional_text_edits.unwrap_or_default()
+        }
+        None => extra.additional,
+    };
+    let imported = apply_edits(&text, &additional);
+    assert!(imported.contains("use std::collections::BTreeSet;") || imported.contains("BTreeSet}"), "{imported}");
+
+    // 3. Snippet: a call completion has tab stops for its arguments.
+    let line = text.lines().position(|l| l.contains("let _n = word_c")).unwrap() as u32;
+    let col = text.lines().nth(line as usize).unwrap().len() as u32;
+    let at = json!({"textDocument":{"uri":uri},"position":{"line":line,"character":col},"context":{"triggerKind":1}});
+    let v = block(p.client.request("textDocument/completion", at)).unwrap_or(Value::Null);
+    let items = match serde_json::from_value::<lt::CompletionResponse>(v) {
+        Ok(lt::CompletionResponse::Array(v)) => v,
+        Ok(lt::CompletionResponse::List(l)) => l.items,
+        Err(_) => vec![],
+    };
+    let call = items.iter().find(|i| i.label.starts_with("word_count")).expect("word_count completion");
+    let raw = match &call.text_edit {
+        Some(lt::CompletionTextEdit::Edit(e)) => e.new_text.clone(),
+        Some(lt::CompletionTextEdit::InsertAndReplace(e)) => e.new_text.clone(),
+        None => call.insert_text.clone().unwrap_or_default(),
+    };
+    eprintln!("snippet: {raw:?} format {:?}", call.insert_text_format);
+    assert_eq!(call.insert_text_format, Some(lt::InsertTextFormat::SNIPPET), "{raw}");
+    let sn = Snippet::parse(&raw);
+    assert!(!sn.is_trivial(), "{raw} has stops");
+    assert!(sn.text.starts_with("word_count("), "{}", sn.text);
+    eprintln!("snippet text {:?} stops {:?}", sn.text, sn.stops);
+
+    block(p.shutdown(timer(3)));
+    assert!(p.exited());
+}

@@ -318,6 +318,11 @@ pub enum SubscribeEvent {
     Terminal(Box<TerminalChangedEvent>),
     Task(Box<TaskChangedEvent>),
     TaskRemoving(Box<TaskRemovingEvent>),
+    /// v10 `task.pr.changed` (lifecycle subscribers).
+    TaskPr(Box<TaskPrChangedEvent>),
+    /// v11 extensions: `mod.notify`, `mod.changed`.
+    ModNotify(Box<ModNotifyEvent>),
+    ModChanged(Box<ModChangedEvent>),
 }
 
 impl StatusStream {
@@ -388,6 +393,19 @@ impl StatusStream {
                     let e: TaskRemovingEvent =
                         serde_json::from_value(n.params.clone()).map_err(bad)?;
                     return Ok(Some(SubscribeEvent::TaskRemoving(Box::new(e))));
+                }
+                NOTIFY_TASK_PR_CHANGED => {
+                    let e: TaskPrChangedEvent =
+                        serde_json::from_value(n.params.clone()).map_err(bad)?;
+                    return Ok(Some(SubscribeEvent::TaskPr(Box::new(e))));
+                }
+                NOTIFY_MOD_NOTIFY => {
+                    let e: ModNotifyEvent = serde_json::from_value(n.params.clone()).map_err(bad)?;
+                    return Ok(Some(SubscribeEvent::ModNotify(Box::new(e))));
+                }
+                NOTIFY_MOD_CHANGED => {
+                    let e: ModChangedEvent = serde_json::from_value(n.params.clone()).map_err(bad)?;
+                    return Ok(Some(SubscribeEvent::ModChanged(Box::new(e))));
                 }
                 _ => continue,
             }

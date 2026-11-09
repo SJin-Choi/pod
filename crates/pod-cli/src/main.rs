@@ -7,6 +7,7 @@
 mod attach;
 mod hooks_install;
 mod orch;
+mod pr;
 mod reconnect;
 mod status;
 
@@ -191,6 +192,11 @@ enum Cmd {
     Gate {
         #[command(subcommand)]
         cmd: orch::GateCmd,
+    },
+    /// A task's GitHub pull request: push, create, status, merge, open (docs/15).
+    Pr {
+        #[command(subcommand)]
+        cmd: pr::PrCmd,
     },
     /// Daemon control.
     Server {
@@ -591,6 +597,7 @@ fn real_main(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Review { cmd } => return orch::review(cmd, &mut connect()?, json),
         Cmd::Group { cmd } => return orch::group(cmd, &mut connect()?, &pipe, json),
         Cmd::Gate { cmd } => return orch::gate(cmd, &mut connect()?, &pipe, json),
+        Cmd::Pr { cmd } => return pr::run(cmd, &mut connect()?, json),
         Cmd::Server {
             cmd: ServerCmd::Schema,
         } => {
@@ -1258,6 +1265,22 @@ mod tests {
         ])
         .is_ok()
             && super::orch::parse_agent_for_test(s)
+    }
+
+    #[test]
+    fn pr_commands_parse() {
+        let cli = Cli::try_parse_from(["pod", "pr", "create", "demo/a", "--title", "제목", "--draft", "--base", "dev", "--no-push"]).unwrap();
+        match cli.cmd {
+            Cmd::Pr { cmd: pr::PrCmd::Create { task, title, draft, base, no_push, .. } } => {
+                assert_eq!((task.as_str(), title.as_deref(), draft, base.as_deref(), no_push), ("demo/a", Some("제목"), true, Some("dev"), true));
+            }
+            _ => panic!("pr create"),
+        }
+        assert!(Cli::try_parse_from(["pod", "pr", "merge", "a"]).is_err(), "--method is required");
+        assert!(Cli::try_parse_from(["pod", "pr", "merge", "a", "--method", "squash", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["pod", "pr", "create", "a", "--body", "x", "--body-file", "f"]).is_err());
+        assert!(Cli::try_parse_from(["pod", "pr", "status", "a", "--cached", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["pod", "pr", "open", "a", "--print"]).is_ok());
     }
 
     #[test]

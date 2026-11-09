@@ -21,6 +21,7 @@ use gpui_kit::*;
 use crate::editor_panel::EditorPanel;
 use crate::layout::{self, Saved, label_key};
 use crate::panel::TerminalPanel;
+use crate::qa_marks::QaId;
 use crate::review::ReviewPanel;
 use crate::source::{PoddSource, Program, RunSpec, SourceEvent, TaskSpec};
 use crate::vm::{self, AgentState, Capabilities, ConnState, Liveness, RepoVm, StatusVm, TaskVm, TerminalVm};
@@ -196,6 +197,8 @@ pub struct StartOptions {
     pub open_all: bool,
     /// Open the Review panel of this task once the task list arrives.
     pub review: Option<String>,
+    /// Open the "확장" settings page once the task list arrives (`--extensions`, screenshots).
+    pub settings: bool,
     /// Check agent hooks at launch with this CLI (`None`: no check, e.g. tests).
     pub hook_cli: Option<crate::hooks_prompt::HookCliHandle>,
 }
@@ -421,7 +424,12 @@ impl Workspace {
                 }
                 self.conn = state;
             }
-            SourceEvent::Caps(caps) => self.caps = caps,
+            SourceEvent::Caps(caps) => {
+                self.caps = caps;
+                crate::mods_ui::refresh(self, cx);
+            }
+            SourceEvent::ModNotice(n) => crate::mods_ui::on_notice(self, *n, cx),
+            SourceEvent::ModChanged(m) => crate::mods_ui::on_changed(*m, cx),
             SourceEvent::Terminals(list) => self.on_terminals(list, window, cx),
             SourceEvent::Tasks(tasks) => {
                 self.tasks = tasks;
@@ -443,6 +451,9 @@ impl Workspace {
                 }
                 if let Some(id) = self.options.review.take() {
                     self.open_review(&id, window, cx);
+                }
+                if std::mem::take(&mut self.options.settings) {
+                    crate::mods_ui::open_page(self, window, cx);
                 }
             }
             SourceEvent::Repos(repos) => self.repos = repos,
@@ -1008,6 +1019,15 @@ impl Workspace {
         match by_focus.or(self.tasks.first()).map(|t| t.id.clone()) {
             Some(id) => self.open_review(&id, window, cx),
             None => self.raise_toast(ToastKind::Info, crate::strings::NO_TASK_TO_REVIEW, crate::strings::CREATE_A_TASK_FIRST_TASK, cx),
+        }
+    }
+
+    /// The Review panel of `task_id` on its PR tab (docs/15); `form` opens
+    /// "브랜치 푸시 및 PR 만들기" when the task has no pull request yet.
+    pub fn open_pr(&mut self, task_id: &str, form: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_review(task_id, window, cx);
+        if let Some(r) = self.live_reviews().into_iter().find(|r| r.read(cx).task_id == task_id) {
+            r.update(cx, |r, cx| r.show_pr(form, window, cx));
         }
     }
 
@@ -1760,7 +1780,7 @@ impl Workspace {
 
     fn render_sidebar(&self, ws: &WeakEntity<Self>, list: AnyElement) -> impl IntoElement {
         div()
-            .debug_selector(|| "sidebar".into())
+            .qa_id(|| "sidebar".into())
             .w(px(304.))
             .h_full()
             .flex()
@@ -1771,7 +1791,7 @@ impl Workspace {
             .child(
                 div().flex().items_center().justify_between().px_3().py_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Pod")).child(
                     div()
-                        .debug_selector(|| "sidebar-actions".into())
+                        .qa_id(|| "sidebar-actions".into())
                         .flex()
                         .gap_1()
                         .child(
@@ -1816,7 +1836,7 @@ impl Workspace {
         let selected = self.focused_terminal.as_deref() == Some(&t.id);
         div()
             .id(SharedString::from(format!("row-{id}")))
-            .debug_selector({
+            .qa_id({
                 let id = id.clone();
                 move || format!("row-{id}")
             })
@@ -1870,7 +1890,7 @@ impl Workspace {
         let _ = cx;
         let item = |s: String| div().child(s);
         div()
-            .debug_selector(|| "status-bar".into())
+            .qa_id(|| "status-bar".into())
             .h(px(24.))
             .px_2()
             .flex()
@@ -1891,7 +1911,7 @@ impl Workspace {
             .when_some(self.lsp_status(cx), |d, (label, color)| {
                 let ws = cx.entity().downgrade();
                 d.child(
-                    div().debug_selector(|| "status-lsp".into()).flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(rgb(color))).child(
+                    div().qa_id(|| "status-lsp".into()).flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(rgb(color))).child(
                         Button::new("status-lsp")
                             .label(label)
                             .tooltip(crate::strings::LSP_STATUS_TOOLTIP)
@@ -1913,9 +1933,9 @@ impl Workspace {
             })
             .when(self.caps.orch, |d| d.child(crate::orch::status_bar_gates(self, cx)))
             .child(div().flex_1())
-            .child(div().debug_selector(|| "status-inspect".into()).child(Button::new("status-inspect").label(crate::strings::STATUS).tooltip("상태 인스펙터 (Ctrl+Shift+S)").xsmall().compact().on_click(cx.listener(|w, _, window, cx| w.open_inspector(window, cx)))))
+            .child(div().qa_id(|| "status-inspect".into()).child(Button::new("status-inspect").label(crate::strings::STATUS).tooltip("상태 인스펙터 (Ctrl+Shift+S)").xsmall().compact().on_click(cx.listener(|w, _, window, cx| w.open_inspector(window, cx)))))
             .child(
-                div().debug_selector(|| "status-notifications".into()).child(
+                div().qa_id(|| "status-notifications".into()).child(
                     Button::new("notifications")
                         .label(crate::tr!(NOTIFICATIONS_122; ; self.toasts.len()))
                         .tooltip("알림 (Ctrl+Shift+B)")
@@ -2312,6 +2332,7 @@ impl Render for Workspace {
             && self.live_editors().is_empty()
             && !self.orch.has_panels()
             && self.settings_panel.as_ref().and_then(|p| p.upgrade()).is_none()
+            && !crate::mods_ui::page_open(cx)
             && self.inspector_panel.as_ref().and_then(|p| p.upgrade()).is_none();
         div()
             .id("workspace-root")

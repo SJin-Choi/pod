@@ -152,7 +152,8 @@ pub fn default_server_request(method: &str, params: &Value) -> Result<Value, Rpc
         }
         "client/registerCapability" | "client/unregisterCapability" | "window/workDoneProgress/create" | "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" | "workspace/diagnostic/refresh" => Ok(Value::Null),
         "window/showMessageRequest" => Ok(Value::Null),
-        "workspace/applyEdit" => Ok(serde_json::json!({"applied": false, "failureReason": "Pod applies edits only from rename preview"})),
+        // The process owner (`server::Forward`) answers this one; here only without an editor.
+        "workspace/applyEdit" => Ok(serde_json::json!({"applied": false, "failureReason": "no editor attached"})),
         _ => Err(RpcError { code: rpc::METHOD_NOT_FOUND, message: format!("unhandled: {method}") }),
     }
 }

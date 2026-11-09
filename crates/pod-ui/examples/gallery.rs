@@ -95,6 +95,7 @@ impl Render for Gallery {
                                 Some(pod_status::Source::Hook) => "hook",
                                 Some(pod_status::Source::Osc) => "osc",
                                 Some(pod_status::Source::Heuristic) => "heuristic",
+                                Some(pod_status::Source::Mod) => "mod",
                                 Some(pod_status::Source::Process) => "process",
                                 None => "unknown",
                             }),

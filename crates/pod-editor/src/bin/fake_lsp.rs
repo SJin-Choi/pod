@@ -103,6 +103,24 @@ fn main() {
                             None => Value::Null,
                         }
                     }
+                    // A command that edits through the client (`workspace/applyEdit`),
+                    // the way servers implement some code actions; answers with the
+                    // client's reply.
+                    "workspace/executeCommand" if params["command"] == "fake.insertHeader" => {
+                        let uri = params["arguments"][0].as_str().unwrap_or("").to_string();
+                        let edit = json!({"changes": {uri: [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "newText": "// header\n"}]}});
+                        send(&mut out, Message::Request { id: json!("fake-apply-1"), method: "workspace/applyEdit".into(), params: json!({"label": "fake header", "edit": edit}) });
+                        let mut answer = Value::Null;
+                        while let Ok(Some(v)) = read_message(&mut r) {
+                            if let Some(Message::Response { id, result }) = Message::parse(v)
+                                && id == json!("fake-apply-1")
+                            {
+                                answer = result.unwrap_or(Value::Null);
+                                break;
+                            }
+                        }
+                        answer
+                    }
                     "textDocument/completion" => json!({"isIncomplete":false,"items":[{"label":"alpha","kind":3,"detail":"fn alpha()"},{"label":"beta","kind":6}]}),
                     "textDocument/definition" => {
                         let (uri, l, c) = pos(&params);

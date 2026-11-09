@@ -12,6 +12,7 @@
 //! --no-throttle do not cap the unfocused window at 30 fps (measurements)
 //! --duration    quit after SECS, printing a `[summary]` line (automation)
 //! --review TASK open the Review panel of TASK at start
+//! --extensions  open the 확장 (extensions) settings page at start
 
 // Release builds are GUI programs: no console window pops up next to the app.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -26,10 +27,15 @@ mod gates;
 mod groups;
 mod hooks_prompt;
 mod layout;
+mod mods_ui;
 #[cfg(test)]
 mod native_qa;
 mod orch;
+mod qa_marks;
 mod panel;
+mod pr_panel;
+#[cfg(test)]
+mod pr_qa;
 mod review;
 mod source;
 mod stats;
@@ -60,6 +66,7 @@ struct Args {
     duration: Option<u64>,
     no_sound: bool,
     review: Option<String>,
+    settings: bool,
     fixture_scene: Option<String>,
 }
 
@@ -74,6 +81,7 @@ fn parse_args() -> Args {
         duration: None,
         no_sound: false,
         review: None,
+        settings: false,
         fixture_scene: None,
     };
     let mut it = std::env::args().skip(1);
@@ -88,6 +96,7 @@ fn parse_args() -> Args {
             "--no-throttle" => a.no_throttle = true,
             "--no-sound" => a.no_sound = true,
             "--review" => a.review = it.next(),
+            "--extensions" => a.settings = true,
             "--duration" => a.duration = it.next().and_then(|v| v.parse().ok()),
             _ => eprintln!("unknown arg: {x}"),
         }
@@ -208,7 +217,7 @@ fn main() {
         } else {
             hooks_prompt::PodCli::next_to_app().map(|c| std::sync::Arc::new(c) as _)
         };
-        let start = StartOptions { open_all: args.open_all, sound: !args.no_sound, review: args.review.clone(), hook_cli: hook_cli.map(hooks_prompt::HookCliHandle) };
+        let start = StartOptions { open_all: args.open_all, sound: !args.no_sound, review: args.review.clone(), settings: args.settings, hook_cli: hook_cli.map(hooks_prompt::HookCliHandle) };
         let (stats_on, duration) = (args.stats || args.duration.is_some(), args.duration);
         let (window_handle, ws) = gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| Workspace::new(source, events, start, window, cx)))
             .expect("failed to open window");

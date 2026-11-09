@@ -70,14 +70,17 @@ pub fn aggregate<I: IntoIterator<Item = AgentState>>(states: I) -> AgentState {
         .unwrap_or(AgentState::Unknown)
 }
 
-/// Where a piece of evidence came from. Ordered by trust: `Hook > Osc > Heuristic > Process`.
+/// Where a piece of evidence came from. Ordered by trust:
+/// `Hook > Osc > Mod > Heuristic > Process`. `Mod` is a status detector or
+/// hint from a Pod extension (docs/16 §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Process = 0,
     Heuristic = 1,
-    Osc = 2,
-    Hook = 3,
+    Mod = 2,
+    Osc = 3,
+    Hook = 4,
 }
 
 impl Source {

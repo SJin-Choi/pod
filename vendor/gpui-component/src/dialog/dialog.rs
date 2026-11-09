@@ -24,6 +24,20 @@ use crate::{
 pub static ANIMATION_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs_f64(0.25));
 pub use gpui_base::actions::{Cancel, Confirm};
 
+/// Receives each painted dialog surface's bounds (`layer index, bounds`).
+pub type DialogBoundsObserver = fn(usize, gpui::Bounds<Pixels>);
+
+thread_local! {
+    static BOUNDS_OBSERVER: std::cell::Cell<Option<DialogBoundsObserver>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pod patch: host UI tests observe dialog bounds in every build profile
+/// (GPUI keeps `debug_selector` bounds only with `debug_assertions`). Unset,
+/// the dialog adds nothing.
+pub fn set_dialog_bounds_observer(observer: Option<DialogBoundsObserver>) {
+    BOUNDS_OBSERVER.with(|o| o.set(observer));
+}
+
 type OkHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>;
 type CancelHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>;
 type CloseHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -787,6 +801,15 @@ impl RenderOnce for Dialog {
                                 .margin(margin)
                                 .child(
                                     v_flex()
+                                        .when_some(BOUNDS_OBSERVER.with(|o| o.get()), |d, f| {
+                                            d.child(
+                                                gpui::canvas(move |b, _, _| f(layer_ix, b), |_, _, _, _| {})
+                                                    .absolute()
+                                                    .top_0()
+                                                    .left_0()
+                                                    .size_full(),
+                                            )
+                                        })
                                         .id("surface")
                                         .test_support()
                                         .debug_selector(move || format!("dialog-{layer_ix}"))

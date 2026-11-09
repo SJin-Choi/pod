@@ -191,8 +191,8 @@ impl Element for TerminalElement {
                         continue;
                     }
                     let runs: Vec<TextRun> = seg.runs.iter().map(|(len, c)| text_run(*len, &font, c, c.fg)).collect();
-                    let line = window.text_system().shape_line(SharedString::from(seg.text), font_size, &runs, Some(cell_w));
-                    let x = origin.x + cell_w * seg.start_col as f32;
+                    let (line, dx) = shape_cells(SharedString::from(seg.text), &runs, font_size, cell_w, seg.wide, window);
+                    let x = origin.x + cell_w * seg.start_col as f32 + dx;
                     let _ = line.paint(point(x, y), line_h, TextAlign::Left, None, window, cx);
                 }
             }
@@ -294,8 +294,8 @@ fn paint_cursor(
             {
                 let text = SharedString::from(c.c.to_string());
                 let run = text_run(text.len(), font, &c, snapshot.default_bg);
-                let line = window.text_system().shape_line(text, font_size, &[run], Some(cell_w));
-                let _ = line.paint(at, line_h, TextAlign::Left, None, window, cx);
+                let (line, dx) = shape_cells(text, &[run], font_size, cell_w, c.wide, window);
+                let _ = line.paint(point(at.x + dx, at.y), line_h, TextAlign::Left, None, window, cx);
             }
         }
         (true, CursorShape::Beam) => window.paint_quad(fill(Bounds::new(at, size(px(2.), line_h)), color)),
@@ -333,8 +333,8 @@ fn paint_preedit(
         }
         let s = SharedString::from(c.to_string());
         let run = text_run(s.len(), font, &style, snapshot.default_fg);
-        let line = window.text_system().shape_line(s, font_size, &[run], Some(cell_w * w as f32));
-        let _ = line.paint(point(x0 + cell_w * col as f32, y), line_h, TextAlign::Left, None, window, cx);
+        let (line, dx) = shape_cells(s, &[run], font_size, cell_w, w > 1, window);
+        let _ = line.paint(point(x0 + cell_w * col as f32 + dx, y), line_h, TextAlign::Left, None, window, cx);
         col += w;
     }
     // Composition underline + caret after the preedit.
@@ -362,8 +362,44 @@ fn paint_scrollbar(bounds: Bounds<Pixels>, snapshot: &Snapshot, window: &mut Win
     window.paint_quad(fill(Bounds::new(point(x, y), size(w, thumb_h)), hsla_of(palette::SCROLLBAR).opacity(alpha)).corner_radii(px(2.)));
 }
 
+/// Shape grid text. Narrow cells get a fixed `cell_w` advance per glyph. A
+/// wide (2-cell) char is shaped at its natural advance and placed by
+/// [`wide_fit`]; returns the line and the x offset inside its first cell.
+fn shape_cells(text: SharedString, runs: &[TextRun], font_size: Pixels, cell_w: Pixels, wide: bool, window: &Window) -> (ShapedLine, Pixels) {
+    let ts = window.text_system();
+    if !wide {
+        return (ts.shape_line(text, font_size, runs, Some(cell_w)), px(0.));
+    }
+    let natural = ts.shape_line(text.clone(), font_size, runs, None);
+    let (dx, k) = wide_fit(natural.width.as_f32(), cell_w.as_f32() * 2., window.scale_factor());
+    if (k - 1.).abs() > 0.001 { (ts.shape_line(text, font_size * k, runs, None), px(dx)) } else { (natural, px(dx)) }
+}
+
+/// Largest enlargement of a wide glyph (keeps it inside the line height:
+/// line height is 1.3 em, a 1.35× Hangul syllable is about 1.25 em tall).
+const WIDE_MAX_GROW: f32 = 1.35;
+
+/// Placement of a wide glyph with natural `advance` in a 2-cell `slot`
+/// (logical px): `(x offset, font scale)`, the offset snapped to device pixels.
+///
+/// Fallback fonts give Hangul/CJK glyphs about 0.92 em of advance (Malgun
+/// Gothic) while two cells of a mono font are ≈ 1.17 em (Cascadia Mono), so at
+/// their natural size every syllable left a visible gap ("문 서"). Like Windows
+/// Terminal, the glyph is scaled so its advance fills the two cells (at most
+/// [`WIDE_MAX_GROW`]; wider glyphs such as some emoji shrink), then centered.
+pub(crate) fn wide_fit(advance: f32, slot: f32, scale: f32) -> (f32, f32) {
+    if !(advance > 0. && slot > 0.) {
+        return (0., 1.);
+    }
+    let k = (slot / advance).min(WIDE_MAX_GROW);
+    let dx = ((slot - advance * k) / 2.).max(0.);
+    ((dx * scale).round() / scale.max(0.01), k)
+}
+
 struct Segment {
     start_col: usize,
+    /// A single wide (2-cell) char.
+    wide: bool,
     text: String,
     /// (byte length, style source cell)
     runs: Vec<(usize, CellSnap)>,
@@ -377,7 +413,7 @@ fn same_style(a: &CellSnap, b: &CellSnap) -> bool {
 /// segment can be shaped with a fixed per-glyph advance.
 fn segments(cells: &[CellSnap]) -> Vec<Segment> {
     let mut out = Vec::new();
-    let mut cur = Segment { start_col: 0, text: String::new(), runs: Vec::new() };
+    let mut cur = Segment { start_col: 0, wide: false, text: String::new(), runs: Vec::new() };
     for (col, cell) in cells.iter().enumerate() {
         if cell.c == '\0' {
             if cur.text.is_empty() {
@@ -387,11 +423,12 @@ fn segments(cells: &[CellSnap]) -> Vec<Segment> {
         }
         if cell.wide {
             if !cur.text.is_empty() {
-                out.push(std::mem::replace(&mut cur, Segment { start_col: col, text: String::new(), runs: Vec::new() }));
+                out.push(std::mem::replace(&mut cur, Segment { start_col: col, wide: false, text: String::new(), runs: Vec::new() }));
             }
             cur.start_col = col;
+            cur.wide = true;
             push_char(&mut cur, cell);
-            out.push(std::mem::replace(&mut cur, Segment { start_col: col + 2, text: String::new(), runs: Vec::new() }));
+            out.push(std::mem::replace(&mut cur, Segment { start_col: col + 2, wide: false, text: String::new(), runs: Vec::new() }));
             continue;
         }
         push_char(&mut cur, cell);
@@ -426,4 +463,49 @@ fn styled_font(base: &Font, c: &CellSnap) -> Font {
 
 pub fn hsla_of(c: u32) -> Hsla {
     rgb(c).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // GPUI's glob exports its own `test` attribute; these are plain Rust tests.
+    use core::prelude::v1::test;
+
+    fn cell(c: char, wide: bool) -> CellSnap {
+        CellSnap { c, fg: 0xffffff, bg: 0, bold: false, italic: false, underline: false, strikeout: false, wide }
+    }
+
+    #[test]
+    fn wide_glyphs_fill_their_two_cells() {
+        // Cascadia Mono at 19.5 px: cell 11.43 px, slot 22.85; Malgun Gothic
+        // Hangul ≈ 0.92 em = 17.9 px → grown to fill the slot (no gap after).
+        let (dx, k) = wide_fit(17.9, 22.85, 1.5);
+        assert!((17.9 * k - 22.85).abs() < 0.01, "{k}");
+        assert_eq!(dx, 0.);
+        // Very narrow glyphs grow at most 1.35× and are centered, snapped to device pixels.
+        let (dx, k) = wide_fit(10., 22.85, 1.5);
+        assert_eq!(k, WIDE_MAX_GROW);
+        assert!((dx - (22.85 - 13.5) / 2.).abs() < 0.34, "{dx}");
+        assert!(((dx * 1.5).round() - dx * 1.5).abs() < 1e-4, "snapped to device pixels");
+        // Exactly two cells: unchanged.
+        assert_eq!(wide_fit(22.85, 22.85, 1.0), (0., 1.));
+    }
+
+    #[test]
+    fn wider_glyphs_shrink_to_the_slot() {
+        let (dx, k) = wide_fit(30., 24., 1.0);
+        assert_eq!(dx, 0.);
+        assert!((k - 0.8).abs() < 1e-6);
+        // Degenerate inputs leave the glyph alone.
+        assert_eq!(wide_fit(0., 24., 1.0), (0., 1.));
+    }
+
+    #[test]
+    fn segments_isolate_wide_chars() {
+        // "문서: a" — 문(2) 서(2) ':' ' ' 'a'
+        let cells = [cell('문', true), cell('\0', false), cell('서', true), cell('\0', false), cell(':', false), cell(' ', false), cell('a', false)];
+        let segs = segments(&cells);
+        let shape: Vec<(usize, bool, &str)> = segs.iter().map(|s| (s.start_col, s.wide, s.text.as_str())).collect();
+        assert_eq!(shape, vec![(0, true, "문"), (2, true, "서"), (4, false, ": a")]);
+    }
 }

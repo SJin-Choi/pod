@@ -99,6 +99,13 @@ impl Selection {
         {
             start.col -= 1;
         }
+        // Never end on the first half of a wide char: the highlight covers the
+        // whole glyph (the text is the same either way).
+        if let Some(row) = src.row(end.line)
+            && row.cells.get(end.col as usize + 1) == Some(&'\0')
+        {
+            end.col += 1;
+        }
         (start, end)
     }
 
@@ -228,6 +235,12 @@ mod tests {
         assert_eq!(sel(SelMode::Simple, (0, 0), (0, 5)).to_text(&r), "a한글b");
         // Starting on a spacer includes its wide char.
         assert_eq!(sel(SelMode::Simple, (0, 2), (0, 4)).to_text(&r), "한글");
+        // Ending on the first half covers the spacer too (full-glyph highlight).
+        let s = sel(SelMode::Simple, (0, 0), (0, 3));
+        assert_eq!(s.range(&r).1.col, 4);
+        assert_eq!(s.to_text(&r), "a한글");
+        // Reversed drag from inside 글 back to 한's spacer: both chars, both halves.
+        assert_eq!(sel(SelMode::Simple, (0, 3), (0, 2)).range(&r), (SelPoint::new(0, 1), SelPoint::new(0, 4)));
     }
 
     #[test]

@@ -20,7 +20,48 @@ use crate::text::PosEncoding;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerEvent {
     Notification { method: String, params: Value },
+    /// `workspace/applyEdit`: the reader thread waits (up to
+    /// [`APPLY_EDIT_WAIT`]) for the owner to apply it and answer on `reply`.
+    ApplyEdit { params: Value, reply: EditReply },
     Exited,
+}
+
+/// How long a server's `workspace/applyEdit` waits for the editor.
+pub const APPLY_EDIT_WAIT: Duration = Duration::from_secs(5);
+
+/// One-shot answer to a `workspace/applyEdit` request. Dropping it unanswered
+/// answers `applied: false`.
+#[derive(Clone, Debug)]
+pub struct EditReply(Arc<Mutex<Option<std::sync::mpsc::Sender<bool>>>>);
+
+impl EditReply {
+    pub fn new() -> (EditReply, std::sync::mpsc::Receiver<bool>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (EditReply(Arc::new(Mutex::new(Some(tx)))), rx)
+    }
+
+    pub fn send(&self, applied: bool) {
+        if let Some(tx) = self.0.lock().unwrap().take() {
+            let _ = tx.send(applied);
+        }
+    }
+}
+
+impl PartialEq for EditReply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for EditReply {}
+
+/// Waits for the owner's answer to a forwarded `workspace/applyEdit`.
+pub fn apply_edit_response(rx: std::sync::mpsc::Receiver<bool>, wait: Duration) -> Value {
+    match rx.recv_timeout(wait) {
+        Ok(true) => json!({ "applied": true }),
+        Ok(false) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => json!({ "applied": false, "failureReason": "the editor could not apply the edit" }),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => json!({ "applied": false, "failureReason": "the editor did not answer in time" }),
+    }
 }
 
 /// Forwards reader-thread callbacks to the owner, tagged with a generation
@@ -54,6 +95,11 @@ impl Handler for Forward {
     }
     fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         trace("<-req", method, &params);
+        if method == "workspace/applyEdit" {
+            let (reply, rx) = EditReply::new();
+            let _ = self.tx.unbounded_send((self.generation, ServerEvent::ApplyEdit { params, reply }));
+            return Ok(apply_edit_response(rx, APPLY_EDIT_WAIT));
+        }
         default_server_request(method, &params)
     }
     fn exited(&self) {
@@ -169,7 +215,7 @@ pub fn client_capabilities() -> Value {
         "workspace": {
             "configuration": true,
             "workspaceFolders": true,
-            "applyEdit": false,
+            "applyEdit": true,
             "workspaceEdit": { "documentChanges": true },
             "didChangeWatchedFiles": { "dynamicRegistration": false }
         },
@@ -238,6 +284,27 @@ pub const MAX_RESTARTS: u32 = 5;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_edit_waits_for_the_editor_answer() {
+        let (reply, rx) = EditReply::new();
+        let r2 = reply.clone();
+        assert_eq!(reply, r2);
+        std::thread::spawn(move || r2.send(true));
+        assert_eq!(apply_edit_response(rx, Duration::from_secs(5)), json!({ "applied": true }));
+        // Dropped unanswered (no editor took it): not applied, at once.
+        let (reply, rx) = EditReply::new();
+        drop(reply);
+        assert_eq!(apply_edit_response(rx, Duration::from_secs(5))["applied"], false);
+        // No answer in time.
+        let (_keep, rx) = EditReply::new();
+        assert_eq!(apply_edit_response(rx, Duration::from_millis(10))["failureReason"], "the editor did not answer in time");
+        // A second answer is ignored.
+        let (reply, rx) = EditReply::new();
+        reply.send(false);
+        reply.send(true);
+        assert_eq!(apply_edit_response(rx, Duration::from_secs(1))["applied"], false);
+    }
 
     #[test]
     fn backoff_doubles_then_gives_up() {

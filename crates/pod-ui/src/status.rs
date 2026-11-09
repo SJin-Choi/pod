@@ -124,6 +124,7 @@ impl StatusBadge {
                 Some(Source::Hook) => "hook",
                 Some(Source::Osc) => "osc",
                 Some(Source::Heuristic) => "heuristic",
+                Some(Source::Mod) => "mod",
                 Some(Source::Process) => "process",
                 None => "unknown",
             },

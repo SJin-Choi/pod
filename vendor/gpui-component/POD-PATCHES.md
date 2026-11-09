@@ -14,4 +14,9 @@ uses) no longer close on Enter while a control inside them has focus: Enter
 propagates to that control, so a focused button gets its keyboard click and a
 text field its own Enter (`dialog.rs`, native-QA keyboard flow). Enter on the
 dialog surface itself still confirms/closes as before.
+`dialog::set_dialog_bounds_observer` (host UI tests only): when set, each
+dialog surface reports its painted bounds through a paint-free absolute
+`canvas`, so Pod's native-QA tests can check dialog placement under
+`cargo test --release` (GPUI's `debug_selector` bounds need `debug_assertions`).
+Unset (the app), the dialog renders exactly as before.
 Remove this patch once these fixes are available in the upstream dependency.

@@ -48,6 +48,9 @@ pub struct TaskRecord {
     /// Terminal ids, first = the agent terminal.
     #[serde(default)]
     pub terminals: Vec<String>,
+    /// Last known pull request of the branch (v10, `server/pr.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<TaskPr>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -235,7 +238,7 @@ pub(super) async fn blocking<T: Send + 'static>(
 }
 
 impl Daemon {
-    fn save_registry(&self, reg: &mut Registry) -> Result<(), RpcError> {
+    pub(super) fn save_registry(&self, reg: &mut Registry) -> Result<(), RpcError> {
         reg.save(&self.config.state_dir)
     }
 
@@ -507,6 +510,7 @@ impl Daemon {
             parent_task,
             parent_terminal,
             terminals: vec![term.id.clone()],
+            pr: None,
         };
         {
             let mut reg = self.registry.lock().unwrap();
@@ -569,6 +573,7 @@ impl Daemon {
             review,
             gates,
             group,
+            pr: rec.pr,
             id: rec.id,
             repo: rec.repo,
             name: rec.name,
@@ -903,6 +908,7 @@ mod tests {
                 parent_task: None,
                 parent_terminal: None,
                 terminals: vec![term.into()],
+                pr: None,
             });
         }
         reg.save(&dir).unwrap();

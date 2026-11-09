@@ -73,6 +73,10 @@ pub enum SourceEvent {
     TaskFilesChanged(String),
     /// v9 `task.removing`: the daemon is about to delete this worktree.
     TaskRemoving { id: String, worktree: String },
+    /// v11 `mod.notify`: an extension's notification (docs/16).
+    ModNotice(Box<p::Notice>),
+    /// v11 `mod.changed`: an extension was enabled, disabled, stopped or reloaded.
+    ModChanged(Box<p::ModInfo>),
 }
 
 /// Set once the connected daemon has sent a `review.delivery` event (it then
@@ -184,18 +188,24 @@ impl PoddSource {
         // git). Everything else stays unanswered, as before.
         let fixture_worktree = crate::fixture_scenes::worktree();
         let (rpc, rpc_rx) = std_mpsc::channel::<RpcCmd>();
-        if let Some(wt) = fixture_worktree.clone() {
-            std::thread::Builder::new()
-                .name("fixture-rpc".into())
-                .spawn(move || {
-                    while let Ok((method, _params, reply)) = rpc_rx.recv() {
-                        if method == "task.diff" {
-                            let _ = reply.send(fixture_task_diff(std::path::Path::new(&wt)));
-                        }
+        let wt = fixture_worktree.clone();
+        std::thread::Builder::new()
+            .name("fixture-rpc".into())
+            .spawn(move || {
+                while let Ok((method, params, reply)) = rpc_rx.recv() {
+                    // PR scenes (docs/15): `task.pr.*` from the fake forge.
+                    if let Some(a) = crate::pr_panel::fixture_answer(method, &params) {
+                        let _ = reply.send(a);
+                    } else if let ("task.diff", Some(wt)) = (method, wt.as_ref()) {
+                        let _ = reply.send(fixture_task_diff(std::path::Path::new(wt)));
+                    } else if method == "review.comments.list" {
+                        let _ = reply.send(Ok(json!({"comments": []})));
+                    } else if method == "review.deliveries" {
+                        let _ = reply.send(Ok(json!({"deliveries": []})));
                     }
-                })
-                .expect("spawn fixture rpc thread");
-        }
+                }
+            })
+            .expect("spawn fixture rpc thread");
         let (input, _) = std_mpsc::channel();
         let (etx, erx) = mpsc::unbounded();
         let mut tasks = Vec::new();
@@ -268,7 +278,7 @@ impl PoddSource {
         let (input, inputs) = std_mpsc::channel();
         let (events, erx) = mpsc::unbounded();
         let pipe = format!(r"\\.\pipe\pod-native-qa-absent-{}", std::process::id());
-        let backend = TestBackend { cmds, rpcs, inputs, events, typed: Vec::new(), acks: Vec::new(), calls: Vec::new(), repos: Vec::new(), tasks: Vec::new(), terminals: Vec::new(), worktrees: HashMap::new(), next: 1 };
+        let backend = TestBackend { cmds, rpcs, inputs, events, typed: Vec::new(), acks: Vec::new(), calls: Vec::new(), repos: Vec::new(), tasks: Vec::new(), terminals: Vec::new(), worktrees: HashMap::new(), rpc: None, next: 1 };
         (Self { pipe, tx, rpc, input }, erx, backend)
     }
 
@@ -961,6 +971,8 @@ fn lifecycle_action(n: &p::Notification) -> Lifecycle {
             Lifecycle::Refresh { terminals: change == "terminals" || change == "removed", tasks: change != "touched", files }
         }
         p::NOTIFY_TASK_REMOVING => Lifecycle::Removing(text("id"), text("worktree")),
+        // v10: the task's pull request changed (TaskInfo.pr; PR sections re-read).
+        p::NOTIFY_TASK_PR_CHANGED => Lifecycle::Refresh { terminals: false, tasks: true, files: None },
         _ => Lifecycle::None,
     }
 }
@@ -981,6 +993,14 @@ fn orch_event(n: &p::Notification) -> Option<SourceEvent> {
             let e: p::ReviewDeliveryEvent = serde_json::from_value(n.params.clone()).ok()?;
             DELIVERY_EVENTS.store(true, std::sync::atomic::Ordering::Relaxed);
             Some(SourceEvent::Delivery(Box::new(e.delivery), e.submit))
+        }
+        p::NOTIFY_MOD_NOTIFY => {
+            let e: p::ModNotifyEvent = serde_json::from_value(n.params.clone()).ok()?;
+            Some(SourceEvent::ModNotice(Box::new(e.notice)))
+        }
+        p::NOTIFY_MOD_CHANGED => {
+            let e: p::ModChangedEvent = serde_json::from_value(n.params.clone()).ok()?;
+            Some(SourceEvent::ModChanged(Box::new(e.info)))
         }
         _ => None,
     }
@@ -1067,6 +1087,9 @@ pub(crate) struct TestBackend {
     pub terminals: Vec<TerminalVm>,
     /// Task id -> a real git worktree whose `task.diff` this backend answers.
     pub worktrees: HashMap<String, std::path::PathBuf>,
+    /// Extra request answers (e.g. `task.pr.*` in the PR tests); `None` falls through.
+    #[allow(clippy::type_complexity)]
+    pub rpc: Option<Box<dyn FnMut(&str, &Value) -> Option<Result<Value, SourceError>>>>,
     next: u32,
 }
 
@@ -1176,6 +1199,10 @@ impl TestBackend {
             n += 1;
             self.calls.push(format!("{method} {params}"));
             let task = params.get("task").and_then(Value::as_str).unwrap_or_default();
+            if let Some(a) = self.rpc.as_mut().and_then(|f| f(method, &params)) {
+                let _ = reply.send(a);
+                continue;
+            }
             let answer = match (method, self.worktrees.get(task)) {
                 ("task.diff", Some(wt)) => fixture_task_diff(wt),
                 _ => Err(SourceError { code: Some(codes::METHOD_NOT_FOUND), message: format!("{method}: not in the native-QA backend") }),

@@ -194,17 +194,32 @@ target\release\pod-editor-demo.exe --fixture <빈 폴더> --scenario hover [--li
 - ~~증분 동기화~~ → fu-app: 편집기의 `InputEditsEvent`(바이트 범위 + 새 텍스트)를 `LspStore::edit_document`가 서버 단위(UTF-16/32) 범위로 바꿔 `didChange {range, text}`로 보낸다(서버가 `textDocumentSync` Incremental일 때, 아니면 전체 텍스트). 저장본이 어긋나면(문자 경계가 아님) 범위를 버리고 기존 120 ms 전체 텍스트 동기화가 복구한다. 테스트 `incremental_ranges_replay_to_the_same_text`(이모지·한글, UTF-16/32).
 - ~~완성 항목 `resolve`, 스니펫, 코드 액션~~ → fu-app:
   - **resolve**: 서버가 `resolveProvider`면 거른 목록의 앞 5개(문서 없는 것)를 `completionItem/resolve`로 동시에 채운다. 메뉴에 지연 해석 고리가 없어서 최대 250 ms만 기다리고, 늦으면 원래 항목을 쓴다. (gpui-component의 `resolve_completions`는 메뉴가 호출하지 않아 쓸 수 없다.)
-  - **스니펫**: `snippetSupport: true`로 알리고, 받은 스니펫을 일반 텍스트로 펼친다(`${1:x}`→`x`, `$0`/`$1` 제거, 선택지는 첫 값, 변수는 기본값, `\$` 이스케이프). 편집기에 스니펫 세션이 없어 탭 정지 이동은 없고 커서는 삽입 끝. `additionalTextEdits`(자동 import)는 아직 적용하지 않는다.
-  - **코드 액션**: `CodeActionProvider`를 연결(Ctrl+.). 범위와 겹치는 진단을 같이 보내고, 고르면 `codeAction/resolve`(필요할 때) → 편집을 모든 파일에 적용(열려 있지 않으면 탭으로 열고 저장은 사용자) → `command`가 있으면 `workspace/executeCommand`. 서버가 `workspace/applyEdit`을 보내는 명령은 아직 효과가 없다(아래).
+  - **스니펫**: `snippetSupport: true`로 알리고, 메뉴에는 펼친 일반 텍스트를 넘긴다(`${1:x}`→`x`, 선택지는 첫 값, 변수는 기본값, `\$` 이스케이프). → small-fixes에서 탭 정지 세션 추가(아래 §7.1).
+  - **코드 액션**: `CodeActionProvider`를 연결(Ctrl+.). 범위와 겹치는 진단을 같이 보내고, 고르면 `codeAction/resolve`(필요할 때) → 편집을 모든 파일에 적용(열려 있지 않으면 탭으로 열고 저장은 사용자) → `command`가 있으면 `workspace/executeCommand`. 서버가 그 명령 안에서 보내는 `workspace/applyEdit`도 적용한다(§7.1).
 - 시그니처 도움말, 시맨틱 토큰, 인레이 힌트.
-- 실제 rust-analyzer로 코드 액션·resolve를 화면에서 확인하지는 않았다(단위 테스트: 스니펫 펼침, 증분 범위; 앱 쪽 QA는 LSP 없는 픽스처).
-- `workspace/applyEdit`(서버 주도 편집)와 `didChangeWatchedFiles` 미지원 → 에이전트가 만든 새 파일을 서버가 늦게 알 수 있음(rust-analyzer는 자체 감시로 대부분 해결).
+- ~~실제 rust-analyzer로 코드 액션·resolve 확인~~ → §7.1 (프로토콜 수준. 화면 캡처는 아님).
+- ~~`workspace/applyEdit`~~ → §7.1. `didChangeWatchedFiles`는 아직 미지원 → 에이전트가 만든 새 파일을 서버가 늦게 알 수 있음(rust-analyzer는 자체 감시로 대부분 해결).
 - 이름 바꾸기 결과의 파일 생성/이름 변경 작업(resource operations)은 무시하고 텍스트 편집만 적용. 열려 있지 않은 파일은 탭으로 열어 적용하고 저장은 사용자가 한다.
 - ~~저장 안 된 탭 닫기 확인 대화상자~~ → 통합 때 구현(저장 후 닫기 / 저장하지 않고 닫기 / 취소).
 - ~~트리 파일 조작(새 파일/이름 바꾸기/삭제)~~ → 통합 때 구현(확인 대화, 워크트리 밖·`..`·`.git` 금지). 드래그, 파일 아이콘은 남음.
 - 에디터 배경·구문 색은 gpui-component 기본 테마 그대로(pod-ui 결정과 같음). Pod 토큰에 맞춘 구문 색 세트는 D3에서.
 - 여러 루트(멀티 루트 워크스페이스)와 원격(SSH/WSL) 경로.
 - pyright/typescript-language-server 실제 연동 확인(이 PC에 미설치라 "설치 안 됨" 표시만 확인).
+- 파일마다 별도 Dock 탭: §7.2 설계 메모(이번에는 구현하지 않음).
+
+### 7.1 small-fixes: 스니펫 세션 · 자동 import · applyEdit (2026-11-09)
+
+- **스니펫 탭 정지**(`lsp/snippet.rs`): `Snippet::parse`가 텍스트와 탭 정지 범위(`$1`, `$2`, … 다음 `$0`, `$0`이 없으면 끝; 같은 번호는 첫 위치만 — 미러 연동 없음)를 돌려준다. `completion()`이 응답마다 항목별 `CompletionExtra`(펼친 텍스트, 스니펫, 자동 import 편집, 지연 해석용 원본 항목)를 `LspStore`에 기억하고(`note_completion`), 편집기의 `InputEditsEvent`에서 **같은 줄에 같은 텍스트(2글자 이상)가 삽입되면** 그 항목으로 보고 꺼낸다(`take_completion`, 한 번만, 120초 뒤 만료). 메뉴의 삽입 함수(gpui-base `insert_completion`)는 vendor가 아니라 손대지 않고, 이벤트로 알아낸다.
+  - 세션(`SnippetSession`): 삽입 직후 첫 자리 표시자를 선택. **Tab** 다음, **Shift+Tab** 이전, 마지막(`$0`)에 오면 캐럿만 두고 끝. **Esc** 세션 끝(완성 메뉴가 열려 있으면 메뉴가 먼저 닫힘). 자리 표시자 안에서 입력하면 그 범위가 늘고 줄며, 앞쪽 편집(자동 import)은 모든 정지를 민다. 정지 경계를 가로지르는 편집이나 캐럿이 현재 정지를 벗어난 뒤의 Tab은 세션을 끝내고 원래 들여쓰기가 된다. 키는 `EditorWorkspace` 루트의 **capture 단계** 액션(`IndentInline`/`OutdentInline`/`Escape`)으로 편집기보다 먼저 받는다.
+- **`additionalTextEdits`**: 항목에 있으면 삽입 직후 적용. 없고 서버가 `resolveProvider` + 항목에 `data`가 있으면(rust-analyzer 자동 import가 이 방식) 삽입 뒤 `completionItem/resolve`로 받아 적용(`resolve_additional_edits`).
+- **열린 버퍼 편집**(코드 액션·이름 바꾸기·자동 import·applyEdit 공통 `edit_buffer`): 전체 `set_value` 대신 뒤에서부터 범위별 `replace` — 실행 취소 기록이 남고, 증분 `didChange`로 가며, 캐럿은 앞쪽 편집만큼 밀린다(이전에는 줄·열을 그대로 두어 import 뒤 캐럿이 한 줄 위로 갔다).
+- **`workspace/applyEdit`**: 클라이언트 능력 `applyEdit: true`. 읽기 스레드가 요청을 `ServerEvent::ApplyEdit {params, reply}`로 넘기고 최대 5초 답을 기다린다 → `LspStoreEvent::ApplyEdit` → 편집기가 `apply_file_edits` 후 `reply.send(모든 파일 적용 여부)`, 상태 표시줄 알림 `<label>: 파일 n개를 고쳤습니다 (저장 전)`. 답이 없거나 편집기가 없으면 `applied: false`와 이유.
+- **테스트**: `snippet.rs` 3(정지 순서·중첩·선택지·한글, 자명한 스니펫, 편집 추적·이동·인접 정지), `store.rs` `completion_extras_match_the_inserted_text_once`, `server.rs` `apply_edit_waits_for_the_editor_answer`, `lsp_lifecycle.rs` `server_apply_edit_is_forwarded_and_answered`(가짜 서버 `fake.insertHeader` 명령 → applyEdit → 적용/거절이 서버에 그대로 전달), pod-app 네이티브 QA `g_snippet_completion_tab_stops_and_auto_import`(메뉴와 같은 `insert_completion` → import 위에 추가, 첫 자리 표시자 선택, Tab/Shift+Tab, 입력으로 바꾸기, Esc 뒤 Tab은 들여쓰기).
+- **실제 rust-analyzer**(`rust_analyzer_code_actions`, `#[ignore]`, 고정 저장소에서만, 끝나면 서버 종료 확인): `HashMap` 위 코드 액션 `Import std::collections::HashMap`(편집 없이 옴 → `codeAction/resolve`) → `use std::collections::HashMap;` 추가; `BTreeS` 완성 `BTreeSet`(추가 편집 없이 옴 → `completionItem/resolve`로 `use` 받음); `word_c` 완성 `word_count(${1:text})$0` → 정지 `text`, 끝. 출력: `crates/pod-app/qa/small-fixes/rust-analyzer-code-actions.txt`. 이 확인 중 rust-analyzer가 서버 URI를 `file:///c%3A/…`처럼 쓰는 것을 봤다 — 제품 경로(`workspace_edit`)는 이미 경로로 비교한다.
+
+### 7.2 설계 메모: 파일마다 별도 Dock 탭 (보류)
+
+지금은 파일 패널 하나 = 워크트리 하나(트리 + 내부 탭). 파일마다 Dock 탭을 두려면 (1) `EditorWorkspace`에서 버퍼(EditorState, 저장 상태, 디스크 감시, LSP 문서)를 소유하는 작업별 **버퍼 저장소**와 (2) 파일 하나를 보여 주는 얇은 **뷰 패널**로 나눠야 한다. 같은 파일을 두 탭에 열면 같은 `EditorState`를 두 요소가 그리게 되는데 gpui-component 에디터는 뷰 하나를 전제로 스크롤·선택을 상태에 둔다 → 분할 보기는 "같은 파일은 한 탭" 규칙이 필요하다. 저장 안 됨 표시·닫기 확인·레이아웃 저장(`PodEditor` 세션 → 탭마다 `{task, path}`)·LSP 수명(마지막 탭이 닫혀야 문서 닫기)도 패널 단위에서 저장소 단위로 옮겨야 한다. pod-app `workspace.rs`/`layout.rs`와 pod-editor UI를 넓게 바꾸는 일이라 "작게"에 맞지 않아 이번 묶음에서는 빼고 남겨 둔다.
 
 ## 8. pod-app 통합 (2026-11-09)
 

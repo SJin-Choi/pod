@@ -25,7 +25,7 @@ required-features = ["server"]
 # the protocol types and the blocking client, so they build with
 # `default-features = false`.
 default = ["server"]
-server = ["dep:tokio", "dep:alacritty_terminal", "dep:pod-status"]
+server = ["dep:tokio", "dep:alacritty_terminal", "dep:pod-status", "pod-mods/runtime"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +36,10 @@ schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "rt", "net", "io-util", "sync", "time", "macros"], optional = true }
 alacritty_terminal = { version = "0.26.0", optional = true }
 pod-status = { path = "../pod-status", optional = true }
+# Forge (GitHub) types for the protocol; the gh-backed provider runs in the daemon.
+pod-forge = { path = "../pod-forge" }
+# Extensions (docs/16): wire types always, the QuickJS runtime with `server`.
+pod-mods = { path = "../pod-mods", default-features = false }
 # Also used by the client side (`detach.rs`: spawning podd / pod-holder with no
 # inherited handles), so not optional.
 windows-sys = { version = "0.61", features = [

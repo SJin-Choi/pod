@@ -585,7 +585,7 @@ Review's empty/error/loading content now has an explicit full-width flex column.
 ### 10.5 남은 일
 
 - ~~터미널 출력의 `path:line` Ctrl+클릭으로 열기~~ → §12.1.
-- 파일 패널 하나 = 워크트리 하나(트리 + 내부 탭) 구조다. 파일 하나하나를 별도 Dock 탭으로 두는 방식은 pod-editor를 버퍼 소유자/뷰로 나눠야 해서 남겨 둠.
+- 파일 패널 하나 = 워크트리 하나(트리 + 내부 탭) 구조다. 파일 하나하나를 별도 Dock 탭으로 두는 방식은 pod-editor를 버퍼 소유자/뷰로 나눠야 해서 남겨 둠. 설계 메모: [docs/13 §7.2](13-editor-and-lsp.md#72-설계-메모-파일마다-별도-dock-탭-보류).
 - ~~상태 표시줄 LSP 항목은 표시만 한다~~ → §12.3 (다시 시작 · 끄기 · 로그 보기).
 - 키보드만으로의 흐름·포커스 링·Narrator는 백그라운드 픽스처 창에서 확인할 수 없음(D3와 같은 이유) — 대화형 데스크톱에서 수동 확인 필요.
 - ~~Ctrl+P는 전역이라 터미널에 ^P를 보내지 못한다~~ → 팔레트 `현재 터미널에 Ctrl+P 보내기`(§12.3).
@@ -638,3 +638,48 @@ UIA 트리 덤프(`qa/native/uia-dump.ps1`)는 릴리스 앱의 접근성 이름
 ### 12.5 검증
 
 `crates/pod-app/qa/followups/`(README에 명령·결과). 네이티브 QA(`native_qa.rs` f_*, g_*): 링크 목록·키보드 선택기로 편집기 2번째 줄, Ctrl 누름/뗌 밑줄, 일반 클릭은 무시·Ctrl+클릭은 주소 열기(테스트에서는 기록만), 프로그램에 입력 안 감; ^P/^K 전달; 훅 배너 → 취소는 dry-run만 → 설치 확인 뒤에만 실제 설치 1회 → 배너 사라짐; 나중에 기억(같은 빌드 무시, 새 빌드 다시 표시); LSP 끄기/로그/다시 시작; 저장 → `task.touch`; `task.removing` 저장/닫기. 단위: 링크 감지 7, 경로 해석 4, 훅 판정 6, v9 매핑 1.
+
+## 13. 작은 후속 small-fixes (2026-11-09)
+
+브랜치 `SJin-Choi/small-fixes`. podd/pod-cli/pod-status/pod-hook은 건드리지 않았다. 증거: `crates/pod-app/qa/small-fixes/`(README).
+
+### 13.1 터미널 넓은 글자(한글·한자·가나·이모지)
+
+- **원인**: 넓은 글자는 2칸을 차지하는데, 글꼴 대체(Cascadia Mono에 한글이 없어 맑은 고딕)로 그린 음절의 자연 폭은 약 0.92 em이고 2칸은 약 1.17 em이다. 글자를 칸 왼쪽에 자연 크기로 그려서 음절마다 0.25 em(150 %에서 약 6 px) 빈칸이 생겼다("문 서 :"). 같은 줄을 Windows Terminal(같은 글꼴, 같은 대체 글꼴)에 띄워 비교하면 한글이 2칸을 거의 꽉 채워 붙어 보인다.
+- **수정**(`pod-terminal-view/src/element.rs`): 넓은 글자는 따로 자연 폭으로 모양을 잡고 `wide_fit`으로 배율을 정한다 — 2칸에 맞게 키우거나(최대 1.35배, 줄 높이 1.3 em 안) 넓은 이모지는 줄이고, 남는 폭은 가운데 정렬(장치 픽셀에 맞춤). 블록 커서 안에 다시 그리는 글자와 IME 조합 글자도 같은 함수를 쓴다.
+- **선택**: 넓은 글자의 앞 절반에서 끝난 선택이 글자 반쪽만 칠하던 것을 뒤 칸까지 넓힌다(`selection.rs`, 복사 텍스트는 같음).
+- **대체 글꼴**: 맑은 고딕을 명시하지 않았다. 시스템 대체가 이미 한글에 맑은 고딕을 고르고, 명시하면 일본어(가나·한자)까지 맑은 고딕으로 바뀐다. D2Coding은 이 PC에 없고 묶지 않았다(글꼴 추가 없음 → 라이선스 변경 없음).
+- 테스트: `element.rs` 3(채움·최대 배율·가운데 정렬·장치 픽셀, 축소, 넓은 글자 분리), `selection.rs` `wide_chars` 확장. 화면: 새 장면 `--fixture-scene editor-terminal-wide`(한글·한자·가나·전각·이모지, `영역` 선택, `다` 위 블록 커서).
+
+### 13.2 `cargo test --release`에서 네이티브 QA
+
+- **원인**: GPUI는 `debug_selector` 경계를 `debug_assertions`일 때만 기록한다(GPUI 자신의 cfg). release 프로필은 꺼져 있어 `Harness::bounds`가 늘 `None` → 훅 배너·상태 표시줄·DPI 테스트가 실패했다. `cargo test --release`는 `release` 프로필이라(별도 test 프로필 아님) 프로필 덮어쓰기로 켜면 배포 앱에도 켜진다.
+- **수정**: pod-app `qa_marks.rs`의 `qa_id(..)` — 테스트 빌드에서만 칠하지 않는 절대 위치 `canvas`를 자식으로 붙여 부모 경계를 기록(Taffy는 절대 위치 자식을 부모 기준으로 놓음), 테스트가 아니면 아무것도 하지 않는다. 하네스가 전체 새로 그리기 직전에 기록을 비워 사라진 요소는 없게 나온다. 툴킷 대화 상자는 vendor 패치 `dialog::set_dialog_bounds_observer`(설정했을 때만 같은 방식, `POD-PATCHES.md`)로 `dialog-<층>`을 기록한다. `debug_selector` 13곳을 `qa_id`로 바꿨다.
+- 결과: `cargo test --release -p pod-app native_qa` 19/19 통과(이전에는 경계를 쓰는 테스트 실패).
+
+### 13.3 `cargo test --workspace`가 doctest 단계에서 255로 끝난 일
+
+- **재현 안 됨**: 이 워크트리에서 debug 백그라운드 1회, debug 전경(PowerShell `2>&1 | Tee-Object`, fu-app과 같은 방식) 1회, release 1회 모두 모든 `Doc-tests` 단계까지 가서 종료 코드 0.
+- **원인 판단**: fu-app 로그는 `Doc-tests pod_editor` 요약 뒤에서 끊기고(다음 `pod_status` 단계 줄이 없음) 실패 줄이 없다. 255는 프로세스 종료 코드 -1(Git Bash/cmd에서 255)이고, `Stop-Process`/`TerminateProcess(-1)`로 강제 종료하면 이 값이 나온다(확인함: `Stop-Process -Force` → -1, `taskkill /F` → 1). 저장소 안의 종료 경로(podd Job Object, holder, LSP Job Object, pod-hook)는 모두 종료 코드 1 또는 0을 쓴다 → 테스트 코드가 cargo를 죽인 것이 아니라 **바깥에서 명령이 강제 종료**된 것(긴 처음 빌드 + 테스트를 도구 호출 하나로 돌리다 시간 제한·취소)으로 판단한다.
+- **권장**: 처음 빌드는 `cargo test --workspace --no-run`으로 따로, 긴 묶음은 백그라운드로 돌리고 로그 끝의 마지막 `Doc-tests podd` 요약과 종료 코드를 같이 확인한다.
+
+### 13.4 편집기 (docs/13 §7.1)
+
+스니펫 탭 정지 세션(Tab / Shift+Tab / Esc), 완성의 `additionalTextEdits`(지연 해석 포함), `workspace/applyEdit`(편집기가 적용한 뒤 결과를 서버에 답함), 열린 버퍼 편집을 실행 취소 가능한 범위 편집으로. 실제 rust-analyzer로 import 빠른 수정·자동 import 완성·스니펫 정지를 고정 저장소에서 확인했다. 파일마다 별도 Dock 탭은 설계 메모만(docs/13 §7.2).
+
+### 13.5 검증 (master `6a61c3d` 병합 뒤)
+
+| 항목 | 결과 |
+|---|---|
+| `cargo test --workspace -- --test-threads=4` | 424 통과, 실패 0, ignored 3, 종료 0 (doctest 7단계 모두, 207 s) |
+| `cargo test --workspace --release -- --test-threads=4` | 424 통과, 실패 0, ignored 3, 종료 0 (네이티브 QA 포함, 253 s) |
+| `cargo clippy -p pod-app -p pod-terminal-view -p pod-editor --all-targets -- -D warnings` | 경고 0 (vendor `gpui-component --lib`도 0) |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` (기존 ISC 미사용 경고만) |
+| 시각 회귀(28장면, 병합 전 빌드) | 28/28 통과, 바뀐 픽셀 0, 기준 이미지 변경 없음 |
+| rust-analyzer 실제 확인 | `rust_analyzer_code_actions` 통과, 끝난 뒤 rust-analyzer 프로세스 0 |
+
+병합으로 들어온 PR 패널(`pr_panel.rs`)과 리뷰 사이드바 탭(`review.rs`)의 `debug_selector` 9곳도 `qa_id`로 바꿨다(`pr_qa` 테스트가 release에서도 경계를 찾도록).
+
+## 14. 확장 (P6 part 2, 2026-11-09)
+
+설정의 "확장 관리"(또는 팔레트 "확장 관리", 시작 옵션 `--extensions`)가 "확장" 페이지를 연다: 모드 목록, 켜기/끄기, 권한 허용/거부, 로그. 실행 중인 모드의 명령과 레이아웃 프리셋은 팔레트에 `모드 이름: 명령`, `레이아웃: 제목`으로 나온다. 모드 알림(`mod.notify`)은 토스트다. 코드 `src/mods_ui.rs`, 설계·검증 [docs/16](16-extensions.md).

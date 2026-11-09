@@ -30,7 +30,7 @@ pub fn lsp_max() -> usize {
 }
 
 pub fn is_editor_scene(s: &str) -> bool {
-    s.starts_with("editor") || s.starts_with("review-editor")
+    s.starts_with("editor") || s.starts_with("review-editor") || s.starts_with("pr-")
 }
 
 /// Worktree of the fixture's task-000 (editor scenes / restore check only).
@@ -45,6 +45,9 @@ pub fn no_lsp() -> bool {
 
 /// Runs before the fixture source starts.
 pub fn prepare(scene: Option<&str>) {
+    if let Some(s) = scene.filter(|s| crate::pr_panel::SCENES.contains(s)) {
+        crate::pr_panel::set_fixture_scene(s);
+    }
     let given = std::env::var("POD_APP_FIXTURE_WORKTREE").ok().filter(|w| Path::new(w).is_dir());
     let wt = given.or_else(|| {
         let scene = scene.filter(|s| is_editor_scene(s))?;
@@ -250,6 +253,26 @@ pub fn run(scene: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context
                 }
             });
         }
+        // Wide characters (Korean, CJK, emoji) in a terminal: glyph spacing,
+        // a selection ending on a wide char, the block cursor on one.
+        "editor-terminal-wide" => {
+            w.open_terminal("fixture-0", false, window, cx);
+            spawn_after(window, cx, 400, move |w, _, cx| {
+                let Some(p) = w.live_panels().into_iter().find(|p| p.read(cx).terminal_id == "fixture-0") else { return };
+                let view = p.read(cx).view.clone();
+                view.update(cx, |v, cx| {
+                    v.feed(WIDE_OUTPUT.as_bytes(), cx);
+                    // "선택 영역" row: drag from 영 to the first half of 역.
+                    let line = v.abs_line_of_row(2);
+                    let sel = pod_terminal_view::selection::Selection {
+                        mode: pod_terminal_view::selection::SelMode::Simple,
+                        anchor: pod_terminal_view::selection::SelPoint::new(line, 5),
+                        head: pod_terminal_view::selection::SelPoint::new(line, 7),
+                    };
+                    v.set_selection(Some(sel), cx);
+                });
+            });
+        }
         // Status-bar language server menu: turned off, then 로그 보기.
         "editor-lsp-log" => {
             open(w, "src/main.rs", 5, window, cx);
@@ -270,6 +293,8 @@ pub fn run(scene: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context
                 });
             }
         }
+        // P6 PR section states from the fake forge (docs/15).
+        s if s.starts_with("pr-") => crate::pr_panel::run_scene(s, w, window, cx),
         _ => {}
     }
 }
@@ -285,6 +310,17 @@ const LINK_OUTPUT: &str = concat!(
     "missing/file.rs:9 (없는 파일은 링크가 아님)\r\n",
     "문서: https://doc.rust-lang.org/error_codes/E0425.html\r\n",
     "PS C:\\fixtures\\sample> ",
+);
+
+/// Wide characters for `editor-terminal-wide`; the caret ends on 다 (a wide cell).
+const WIDE_OUTPUT: &str = concat!(
+    "PS C:\\fixtures\\sample> type 문서.txt\r\n",
+    "문서: 한글 가나다라마바사 ABC abc 123\r\n",
+    "선택 영역 확인 (마우스)\r\n",
+    "漢字 かな カナ 全角ＡＢＣ\r\n",
+    "emoji 😀👍🎉 end\r\n",
+    "src\\lib.rs(3,1): note: MSVC 형식 경로\r\n",
+    "PS C:\\fixtures\\sample> 가나다\x1b[2D",
 );
 
 fn spawn_after(window: &mut Window, cx: &mut Context<Workspace>, ms: u64, f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) {

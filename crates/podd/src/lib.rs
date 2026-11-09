@@ -19,7 +19,9 @@ pub mod detach;
 pub mod endpoint;
 pub mod env;
 pub mod keys;
+pub mod mods_protocol;
 pub mod orch_protocol;
+pub mod pr_protocol;
 pub mod protocol;
 pub mod status_protocol;
 

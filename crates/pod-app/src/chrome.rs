@@ -7,6 +7,9 @@ use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
 use gpui_kit::component::{TitleBar, WindowExt};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+
+use crate::qa_marks::QaId;
+
 actions!(pod_chrome, [JumpAlternate, Jump, SettingsAction, NewTask, Notifications, InspectStatus]);
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -55,6 +58,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("open-repo", crate::strings::OPEN_REPOSITORY, crate::strings::REGISTER_A_LOCAL_GIT_REPOSITORY),
     ("terminal", crate::strings::NEW_TERMINAL, "Ctrl+Shift+T"),
     ("settings", crate::strings::SETTINGS, "Ctrl+,"),
+    ("extensions", crate::mods_ui::s::OPEN_PAGE, crate::mods_ui::s::OPEN_PAGE_DETAIL),
     ("blocked", crate::strings::FIND_NEXT_BLOCKED_REQUEST, crate::strings::RETURN_TO_THE_TERMINAL_THAT_NEEDS_YOU),
     ("inspect", crate::strings::INSPECT_CURRENT_TERMINAL_STATUS, crate::strings::SOURCE_AND_FRESHNESS),
     ("notifications", crate::strings::NOTIFICATIONS, crate::strings::PENDING_REQUESTS_AND_RECENT_EVENTS),
@@ -90,7 +94,7 @@ impl Workspace {
                 .min_w_0()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Pod"))
                 .child(div().flex_1().min_w_0().truncate().child(context))
-                .child(div().debug_selector(|| "title-actions".into()).flex().items_center().gap_3().child(
+                .child(div().qa_id(|| "title-actions".into()).flex().items_center().gap_3().child(
                     Button::new("jump")
                         .label(crate::strings::SEARCH_COMMANDS_TERMINALS_CTRL_K)
                         // The tooltip is also the accessible description: Narrator reads the shortcut.
@@ -108,6 +112,9 @@ impl Workspace {
         }
         if let Some(id) = id.strip_prefix("task:") {
             self.open_task_dialog(id.into(), window, cx);
+            return;
+        }
+        if crate::mods_ui::run(self, id, window, cx) {
             return;
         }
         if let Some(n) = id.strip_prefix("link:").and_then(|n| n.parse().ok()) {
@@ -136,6 +143,7 @@ impl Workspace {
             "open-repo" => self.open_repository(window, cx),
             "terminal" => self.open_new_dialog(window, cx),
             "settings" => self.open_settings(window, cx),
+            "extensions" => crate::mods_ui::open_page(self, window, cx),
             "grid" => self.arrange_grid(window, cx),
             "new-group" => self.open_new_group_dialog(window, cx),
             "gates" => self.open_gates(window, cx),
@@ -238,6 +246,7 @@ impl Workspace {
             .collect();
         entries.extend(self.tasks.iter().map(|t| Entry { id: format!("task:{}", t.id), title: t.title.clone(), detail: t.id.clone() }));
         entries.extend(COMMANDS.iter().map(|(id, title, detail)| Entry { id: (*id).into(), title: (*title).into(), detail: (*detail).into() }));
+        entries.extend(crate::mods_ui::palette_entries(cx).into_iter().map(|(id, title, detail)| Entry { id, title, detail }));
         let recents = &cx.global::<Settings>().recents;
         entries.sort_by_key(|e| {
             recents.iter().position(|id| id == &e.id).unwrap_or(usize::MAX)
@@ -657,7 +666,7 @@ impl Render for ChromePanel {
                 body = body.child(row);
             }
 
-            body.child(div().text_xs().child(crate::strings::CTRL_K))
+            body.child(div().text_xs().child(crate::strings::CTRL_K)).child(crate::mods_ui::settings_link(&ws, cx))
         };
         div()
             .id("chrome-panel")

@@ -176,7 +176,7 @@ impl Daemon {
             .collect()
     }
 
-    fn tasks_of_terminal(&self, terminal: &str) -> Vec<String> {
+    pub(super) fn tasks_of_terminal(&self, terminal: &str) -> Vec<String> {
         self.registry
             .lock()
             .unwrap()
@@ -188,7 +188,7 @@ impl Daemon {
     }
 
     /// The task's aggregate status right now (no git).
-    fn task_status_now(&self, task: &str) -> Option<TaskStatus> {
+    pub(super) fn task_status_now(&self, task: &str) -> Option<TaskStatus> {
         let ids = self.task_record(task).ok()?.terminals;
         let infos: Vec<TerminalInfo> = {
             let terms: Vec<Arc<super::terminal::Terminal>> = self.terminals.lock().unwrap().clone();

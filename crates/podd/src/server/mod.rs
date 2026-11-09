@@ -9,7 +9,9 @@ pub mod agent_launch;
 pub mod gates;
 pub mod groups;
 pub mod lifecycle;
+pub mod mods;
 pub mod orch_store;
+pub mod pr;
 pub mod query_dedup;
 pub mod retention;
 pub mod review;
@@ -150,6 +152,10 @@ pub struct Daemon {
     gate_wake: tokio::sync::Notify,
     /// Running `group.check` jobs: group id -> cancel flag.
     check_jobs: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// GitHub through `gh`, or the fake forge (`POD_FORGE=fake:<file>`), docs/15.
+    forge: Arc<dyn pod_forge::Forge>,
+    /// Serializes `task.pr.create` / `task.pr.merge` (pushes and PR writes).
+    pr_ops: tokio::sync::Mutex<()>,
 }
 
 /// Create the first pipe instance. `first_pipe_instance` makes creation fail
@@ -202,6 +208,8 @@ pub async fn serve(
         kept: Mutex::new(HashSet::new()),
         gate_wake: tokio::sync::Notify::new(),
         check_jobs: Mutex::new(Default::default()),
+        forge: Arc::from(pod_forge::from_env()),
+        pr_ops: tokio::sync::Mutex::new(()),
     });
     log(&format!(
         "listening on {} (pid {}, state {})",
@@ -218,6 +226,8 @@ pub async fn serve(
     gates::start(&daemon);
     retention::start(&daemon);
     lifecycle::start(&daemon);
+    pr::start(&daemon);
+    mods::start(&daemon);
     {
         let reg = daemon.registry.lock().unwrap();
         // Never hand out an id a task still refers to.
@@ -441,6 +451,7 @@ impl Daemon {
                 "terminal.attach must be a request with an id",
             )),
             m if status::handles(m) => status::dispatch(self, m, p).await,
+            m if mods::handles(m) => mods::dispatch(m, p).await,
             RepoAdd::NAME => to_value(self.repo_add(params(p)?).await?),
             RepoList::NAME => {
                 let _: Empty = params(p)?;
@@ -453,6 +464,9 @@ impl Daemon {
             TaskDiff::NAME => to_value(self.task_diff(params(p)?).await?),
             TaskRemove::NAME => to_value(self.task_remove(params(p)?).await?),
             TaskTouch::NAME => to_value(self.task_touch(params(p)?).await?),
+            TaskPrStatusMethod::NAME => to_value(self.task_pr_status(params(p)?).await?),
+            TaskPrCreate::NAME => to_value(self.task_pr_create(params(p)?).await?),
+            TaskPrMerge::NAME => to_value(self.task_pr_merge(params(p)?).await?),
             ReviewCommentsAdd::NAME => to_value(self.review_add(params(p)?).await?),
             ReviewCommentsList::NAME => to_value(self.review_list(params(p)?)?),
             ReviewCommentsResolve::NAME => to_value(self.review_resolve(params(p)?)?),

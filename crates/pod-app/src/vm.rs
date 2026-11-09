@@ -249,6 +249,10 @@ pub struct TaskVm {
     pub parent_terminal: Option<String>,
     /// Fan-out group this task is a member of (v5 `TaskInfo.group`).
     pub group: Option<String>,
+    /// Task prompt (v3), prefills the pull request title/body.
+    pub prompt: Option<String>,
+    /// Last known pull request (v10 `TaskInfo.pr`, docs/15).
+    pub pr: Option<podd::protocol::TaskPr>,
 }
 
 impl TaskVm {
@@ -288,6 +292,8 @@ impl TaskVm {
                 parent_task: t.parent_task,
                 parent_terminal: t.parent_terminal,
                 group: t.group,
+                prompt: t.prompt,
+                pr: t.pr,
                 id: t.id,
             });
         }
@@ -314,6 +320,8 @@ impl TaskVm {
             parent_task: text("parent_task"),
             parent_terminal: text("parent_terminal"),
             group: text("group"),
+            prompt: text("prompt"),
+            pr: v.get("pr").and_then(|p| serde_json::from_value(p.clone()).ok()),
             id,
         })
     }

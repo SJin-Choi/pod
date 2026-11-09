@@ -35,6 +35,8 @@ impl Default for StatusConfig {
 pub const CONF_HOOK: f32 = 0.95;
 pub const CONF_OSC: f32 = 0.9;
 pub const CONF_PROCESS: f32 = 0.2;
+/// A Pod extension's status detector or hint (docs/16 §7.1).
+pub const CONF_MOD: f32 = 0.75;
 /// `working` inferred from the user answering a hook permission/question
 /// prompt (no hook reports the answer; docs/12 B2). Reported as `heuristic`.
 pub const CONF_ANSWERED: f32 = 0.6;
@@ -216,6 +218,8 @@ pub struct TerminalStatus {
     heur: HeuristicTracker,
     hook: Option<Evidence>,
     osc: Option<Evidence>,
+    /// Evidence from a Pod extension (`Source::Mod`), below OSC.
+    modev: Option<Evidence>,
     /// Event order (not time: podd replays OSC before restored hooks after a
     /// restart): bumped on every root OSC state change and hook root set.
     order: u64,
@@ -256,6 +260,7 @@ impl TerminalStatus {
             heur: HeuristicTracker::new(),
             hook: None,
             osc: None,
+            modev: None,
             order: 0,
             osc_changed_at: 0,
             hook_set_at: 0,
@@ -429,6 +434,19 @@ impl TerminalStatus {
         self.recompute(now)
     }
 
+    /// A Pod extension reported a state for this terminal (`None` clears
+    /// its evidence). Ranked below hook and OSC, above the heuristics; stays
+    /// until replaced, cleared or the process exits.
+    pub fn on_mod(&mut self, state: Option<AgentState>, msg: Option<String>, now: Millis) -> Option<Transition> {
+        match state {
+            None | Some(AgentState::Unknown) | Some(AgentState::Exited) => self.modev = None,
+            Some(st) => {
+                self.modev = Some(Evidence { state: st, at: now, confidence: CONF_MOD, msg, progress: None, title: None });
+            }
+        }
+        self.recompute(now)
+    }
+
     /// The visible screen text changed (podd may throttle this, e.g. last N rows).
     pub fn on_screen(&mut self, screen: &str, now: Millis) -> Option<Transition> {
         self.heur.on_screen(self.agent.as_ref(), screen, now);
@@ -476,6 +494,7 @@ impl TerminalStatus {
         self.agent_from_process = false;
         self.osc = None;
         self.hook = None;
+        self.modev = None;
         self.hook_before_wait = None;
         self.answered_at = None;
         self.hook_inferred = None;
@@ -603,7 +622,7 @@ impl TerminalStatus {
         if self.current != AgentState::Done {
             return None;
         }
-        for ev in [self.hook.as_mut(), self.osc.as_mut()]
+        for ev in [self.hook.as_mut(), self.osc.as_mut(), self.modev.as_mut()]
             .into_iter()
             .flatten()
         {
@@ -667,6 +686,7 @@ impl TerminalStatus {
         match self.source {
             Some(Source::Hook) => self.hook.as_ref(),
             Some(Source::Osc) => self.osc.as_ref(),
+            Some(Source::Mod) => self.modev.as_ref(),
             _ => None,
         }
     }
@@ -777,9 +797,10 @@ impl TerminalStatus {
             progress: None,
             title: None,
         });
-        let slots: [(Source, Option<&Evidence>, Millis); 3] = [
+        let slots: [(Source, Option<&Evidence>, Millis); 4] = [
             (Source::Hook, self.hook.as_ref(), self.hook_stale_after()),
             (Source::Osc, self.osc.as_ref(), Millis::MAX), // fresh until process exit
+            (Source::Mod, self.modev.as_ref(), Millis::MAX), // until cleared or exit
             (Source::Heuristic, heur.as_ref(), Millis::MAX),
         ];
         let mut stale_best: Option<(Source, &Evidence)> = None;

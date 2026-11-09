@@ -77,6 +77,11 @@ pub(super) enum HubEvent {
     Terminal(TerminalChangedEvent),
     Task(TaskChangedEvent),
     TaskRemoving(TaskRemovingEvent),
+    /// v10 `task.pr.changed` (lifecycle subscribers only).
+    TaskPr(TaskPrChangedEvent),
+    /// v11 extensions (docs/16): `pod.notify` and mod state changes.
+    ModNotify(ModNotifyEvent),
+    ModChanged(ModChangedEvent),
 }
 
 fn hub() -> &'static Hub {
@@ -207,6 +212,26 @@ pub(super) fn publish_task_removing(id: &str, worktree: &str, force: bool, grace
     })
 }
 
+/// v10 `task.pr.changed`.
+pub(super) fn publish_task_pr(id: &str, pr: Option<TaskPr>) -> u64 {
+    publish_with(|seq| HubEvent::TaskPr(TaskPrChangedEvent { seq, id: id.to_string(), pr }))
+}
+
+/// v11 `mod.notify` / `mod.changed`; the `seq` in `ev` is replaced.
+pub(super) fn publish_mod(ev: HubEvent) -> u64 {
+    publish_with(|seq| match ev {
+        HubEvent::ModNotify(mut e) => {
+            e.seq = seq;
+            HubEvent::ModNotify(e)
+        }
+        HubEvent::ModChanged(mut e) => {
+            e.seq = seq;
+            HubEvent::ModChanged(e)
+        }
+        other => other,
+    })
+}
+
 /// Connected `status.subscribe` streams that asked for lifecycle events.
 static LIFECYCLE_SUBSCRIBERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -249,7 +274,7 @@ pub(super) fn start(daemon: &Arc<Daemon>) {
             iv.tick().await;
             let terms: Vec<Arc<Terminal>> = daemon.terminals.lock().unwrap().clone();
             for t in &terms {
-                t.status.sample(t);
+                t.status.sample(&daemon, t);
             }
         }
     });
@@ -413,6 +438,11 @@ struct Inner {
     seq: u64,
     /// Saved to the state dir when it changes.
     persisted: Persisted,
+    /// Mod that set the current `Source::Mod` evidence (docs/16 §7.1).
+    mod_owner: Option<String>,
+    /// Last window title, and whether detectors have not seen it yet.
+    last_title: Option<String>,
+    title_unsent: bool,
 }
 
 impl TermStatus {
@@ -471,6 +501,9 @@ impl TermStatus {
                 published: None,
                 seq: 0,
                 persisted,
+                mod_owner: None,
+                last_title: None,
+                title_unsent: false,
             }),
         };
         s.publish(&mut s.inner.lock().unwrap());
@@ -485,6 +518,8 @@ impl TermStatus {
         let _ = g.engine.feed_output(data, now);
         for title in g.titles.feed(data) {
             g.engine.on_title(&title, now);
+            g.last_title = Some(title);
+            g.title_unsent = true;
         }
         if let Some(at) = g.engine.answer_inferred_at()
             && at != g.persisted.answered_ms
@@ -510,8 +545,35 @@ impl TermStatus {
         self.publish(&mut g);
     }
 
+    /// Evidence from extension `owner` (`None` clears it), docs/16 §7.1.
+    pub fn on_mod(&self, owner: &str, hint: Option<(AgentState, Option<String>)>) {
+        let mut g = self.inner.lock().unwrap();
+        let now = now();
+        match hint {
+            Some((state, msg)) => {
+                g.engine.on_mod(Some(state), msg, now);
+                g.mod_owner = Some(owner.to_string());
+            }
+            None => {
+                g.engine.on_mod(None, None, now);
+                g.mod_owner = None;
+            }
+        }
+        self.publish(&mut g);
+    }
+
+    /// Drop extension `owner`'s evidence (the mod stopped or was disabled).
+    pub fn clear_mod(&self, owner: &str) {
+        let mut g = self.inner.lock().unwrap();
+        if g.mod_owner.as_deref() == Some(owner) {
+            g.mod_owner = None;
+            g.engine.on_mod(None, None, now());
+            self.publish(&mut g);
+        }
+    }
+
     /// Ticker: throttled screen sample + periodic engine tick.
-    fn sample(&self, t: &Terminal) {
+    fn sample(&self, daemon: &Daemon, t: &Terminal) {
         let now = now();
         let want_screen = {
             let g = self.inner.lock().unwrap();
@@ -525,17 +587,23 @@ impl TermStatus {
             g.screen_dirty = false;
             g.last_screen_at = now;
         }
+        let mut changed_screen = None;
         if let Some(text) = screen
             && text != g.last_screen
         {
             g.engine.on_screen(&text, now);
-            g.last_screen = text;
+            g.last_screen = text.clone();
+            changed_screen = Some(text);
         }
+        let title = if std::mem::take(&mut g.title_unsent) { g.last_title.clone() } else { None };
         if now.saturating_sub(g.last_tick) >= TICK_INTERVAL_MS {
             g.last_tick = now;
             g.engine.tick(now);
         }
         self.publish(&mut g);
+        drop(g);
+        // Extension status detectors see the same samples (no lock held).
+        super::mods::sample(daemon, t, changed_screen.as_deref(), title);
     }
 
     /// A hook message addressed to this terminal. Rejected unless its token
@@ -660,6 +728,7 @@ fn make_info(g: &Inner) -> StatusInfo {
                 Source::Hook => "hook",
                 Source::Osc => "osc",
                 Source::Heuristic => "heuristic",
+                Source::Mod => "mod",
                 Source::Process => "process",
             }
             .into()
@@ -1056,6 +1125,30 @@ pub(super) async fn stream_subscribe(
                         continue;
                     }
                     if write_json(&mut write, &notification(NOTIFY_TASK_REMOVING, ev)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(HubEvent::TaskPr(ev)) => {
+                    if !p.lifecycle || !p.ids.is_empty() {
+                        continue;
+                    }
+                    if write_json(&mut write, &notification(NOTIFY_TASK_PR_CHANGED, ev)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(HubEvent::ModNotify(ev)) => {
+                    if !p.ids.is_empty() {
+                        continue;
+                    }
+                    if write_json(&mut write, &notification(NOTIFY_MOD_NOTIFY, ev)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(HubEvent::ModChanged(ev)) => {
+                    if !p.ids.is_empty() {
+                        continue;
+                    }
+                    if write_json(&mut write, &notification(NOTIFY_MOD_CHANGED, ev)).await.is_err() {
                         break;
                     }
                 }

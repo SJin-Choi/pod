@@ -504,6 +504,8 @@ mod tests {
             parent_task: None,
             parent_terminal: parent_terminal.map(str::to_owned),
             group: group.map(str::to_owned),
+            prompt: None,
+            pr: None,
         }
     }
 

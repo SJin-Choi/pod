@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use gpui_kit::base::dock::{Panel, PanelEvent, PanelInfo, PanelState};
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -768,7 +769,21 @@ impl GroupPanel {
                         .gap_2()
                         .when_some(summary_badge(summary), |d, b| d.child(b.render(mode())))
                         .when_some(winner, |d, w| {
-                            d.child(div().px_2().py_1().rounded_sm().bg(tc(t.success_bg)).text_color(tc(t.success_fg)).child(crate::tr!(WINNER_W; w;)))
+                            let ws = self.workspace.clone();
+                            let task = w.clone();
+                            d.child(div().px_2().py_1().rounded_sm().bg(tc(t.success_bg)).text_color(tc(t.success_fg)).child(crate::tr!(WINNER_W; w;))).child(
+                                // P6: the winner goes on to a pull request (docs/15).
+                                Button::new("grp-winner-pr")
+                                    .label(crate::pr_panel::s::CREATE_PR_FOR_WINNER)
+                                    .xsmall()
+                                    .tooltip(crate::pr_panel::s::CREATE_PR_FOR_WINNER_TIP)
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        let (ws, task) = (ws.clone(), task.clone());
+                                        cx.defer_in(window, move |_, window, cx| {
+                                            let _ = ws.update(cx, |w, cx| w.open_pr(&task, true, window, cx));
+                                        });
+                                    })),
+                            )
                         })
                         .into_any_element(),
                     div()

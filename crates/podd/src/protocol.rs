@@ -12,7 +12,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use crate::mods_protocol::*;
 pub use crate::orch_protocol::*;
+pub use crate::pr_protocol::*;
 pub use crate::status_protocol::*;
 
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -31,7 +33,12 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// (`terminal.changed`, `task.changed`, `task.removing`), `task.touch`,
 /// color-query reply de-duplication and the late-reply guard on
 /// `terminal.input` (`SendResult.dropped_replies`) (all additive).
-pub const PROTOCOL_VERSION: u32 = 9;
+/// v10 = v9 + task pull requests (docs/15): `task.pr.status`,
+/// `task.pr.create`, `task.pr.merge`, `TaskInfo.pr`, the `task.pr.changed`
+/// lifecycle notification and the `FORGE_FAILED` error code (all additive).
+/// v11 = v10 + extensions (docs/16): `mod.list/set_enabled/grant/log/command/reload`,
+/// `mod.notify` / `mod.changed` events, status source `"mod"` (all additive).
+pub const PROTOCOL_VERSION: u32 = 11;
 
 // ---------------------------------------------------------------------------
 // Envelope
@@ -926,6 +933,9 @@ pub struct TaskInfo {
     /// Group this task is a member of (v5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Last known pull request of the task's branch (v10, docs/15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<TaskPr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1058,6 +1068,9 @@ pub fn schema() -> Value {
         entry::<TaskDiff>(),
         entry::<TaskRemove>(),
         entry::<TaskTouch>(),
+        entry::<TaskPrStatusMethod>(),
+        entry::<TaskPrCreate>(),
+        entry::<TaskPrMerge>(),
         entry::<ReviewCommentsAdd>(),
         entry::<ReviewCommentsList>(),
         entry::<ReviewCommentsResolve>(),
@@ -1078,6 +1091,12 @@ pub fn schema() -> Value {
         entry::<GateList>(),
         entry::<GateShow>(),
         entry::<GateWait>(),
+        entry::<ModListMethod>(),
+        entry::<ModSetEnabled>(),
+        entry::<ModGrant>(),
+        entry::<ModLog>(),
+        entry::<ModCommand>(),
+        entry::<ModReload>(),
     ]
     .into_iter()
     .collect();
@@ -1098,6 +1117,9 @@ pub fn schema() -> Value {
             NOTIFY_TERMINAL_CHANGED: schemars::schema_for!(TerminalChangedEvent),
             NOTIFY_TASK_CHANGED: schemars::schema_for!(TaskChangedEvent),
             NOTIFY_TASK_REMOVING: schemars::schema_for!(TaskRemovingEvent),
+            NOTIFY_TASK_PR_CHANGED: schemars::schema_for!(TaskPrChangedEvent),
+            NOTIFY_MOD_NOTIFY: schemars::schema_for!(ModNotifyEvent),
+            NOTIFY_MOD_CHANGED: schemars::schema_for!(ModChangedEvent),
         },
         "error": schemars::schema_for!(RpcError),
     })
@@ -1152,7 +1174,7 @@ mod tests {
     #[test]
     fn schema_lists_all_methods() {
         let s = schema();
-        for m in METHODS.iter().chain(STATUS_METHODS).chain(ORCH_METHODS) {
+        for m in METHODS.iter().chain(STATUS_METHODS).chain(ORCH_METHODS).chain(PR_METHODS) {
             assert!(s["methods"].get(*m).is_some(), "{m} missing from schema");
         }
         assert!(s["notifications"].get(NOTIFY_OUTPUT).is_some());

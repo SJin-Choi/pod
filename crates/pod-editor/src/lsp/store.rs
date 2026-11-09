@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 use super::registry::{Availability, Language, ServerConfig, ServerRegistry, check_available, find_root, language_for_path};
 use super::server::{self, Initialized, ServerEvent, ServerProcess, restart_backoff};
+use super::snippet::Snippet;
 use crate::text::{self, PosEncoding};
 use crate::uri::{path_key, path_to_uri, uri_to_path};
 
@@ -110,17 +111,46 @@ pub struct Location {
     pub range: lt::Range,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileEdit {
     pub path: PathBuf,
     /// Editor-column edits, in document order.
     pub edits: Vec<lt::TextEdit>,
 }
 
+/// What a completion item still needs after the editor inserted its text:
+/// a tab-stop session and/or auto-import (`additionalTextEdits`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletionExtra {
+    /// Plain text the editor inserts for the item (snippet already expanded).
+    pub text: String,
+    pub snippet: Option<Snippet>,
+    /// Editor-column edits elsewhere in the file (usually `use` lines).
+    pub additional: Vec<lt::TextEdit>,
+    /// The original item, when the server fills `additionalTextEdits` only
+    /// on `completionItem/resolve` (requested after insertion).
+    pub resolve: Option<lt::CompletionItem>,
+}
+
+/// Extras of the last completion response, matched against the next
+/// insertion of the same text on the same line.
+struct PendingCompletion {
+    path: String,
+    line: u32,
+    at: Instant,
+    items: Vec<CompletionExtra>,
+}
+
+/// Pending extras expire after this long (a stale menu is not reused).
+const PENDING_COMPLETION_TTL: Duration = Duration::from_secs(120);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LspStoreEvent {
     DiagnosticsChanged(PathBuf),
     ServersChanged,
+    /// A server asked to edit files (`workspace/applyEdit`, e.g. from a
+    /// code action's command). The host applies them and answers `reply`.
+    ApplyEdit { label: Option<String>, edits: Vec<FileEdit>, reply: server::EditReply },
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +188,7 @@ pub struct LspStore {
     /// Shortens timers in tests.
     pub backoff_scale: f32,
     enabled: bool,
+    pending_completion: Option<PendingCompletion>,
 }
 
 impl EventEmitter<LspStoreEvent> for LspStore {}
@@ -169,7 +200,7 @@ impl LspStore {
     }
 
     pub fn with_registry(worktree: PathBuf, registry: ServerRegistry, config_errors: Vec<String>) -> Self {
-        LspStore { worktree, registry, config_errors, slots: HashMap::new(), docs: HashMap::new(), diagnostics: BTreeMap::new(), backoff_scale: 1.0, enabled: true }
+        LspStore { worktree, registry, config_errors, slots: HashMap::new(), docs: HashMap::new(), diagnostics: BTreeMap::new(), backoff_scale: 1.0, enabled: true, pending_completion: None }
     }
 
     /// Disables LSP entirely (e.g. a host setting, the status-bar "끄기");
@@ -502,6 +533,16 @@ impl LspStore {
         }
         match ev {
             ServerEvent::Exited => self.on_exited(key, cx),
+            ServerEvent::ApplyEdit { params, reply } => {
+                let enc = slot.init.as_ref().map(|i| i.encoding).unwrap_or(PosEncoding::Utf16);
+                match serde_json::from_value::<lt::ApplyWorkspaceEditParams>(params) {
+                    Ok(p) => {
+                        let edits = self.workspace_edit(p.edit, enc);
+                        cx.emit(LspStoreEvent::ApplyEdit { label: p.label, edits, reply });
+                    }
+                    Err(_) => reply.send(false),
+                }
+            }
             ServerEvent::Notification { method, params } => match method.as_str() {
                 "textDocument/publishDiagnostics" => self.on_diagnostics(key, params, cx),
                 "$/progress" => {
@@ -887,6 +928,15 @@ impl LspStore {
                     }
                 }
             }
+            let extras: Vec<CompletionExtra> = items.iter().filter_map(|i| completion_extra(i, resolve)).map(|mut e| {
+                if enc != PosEncoding::Utf32 {
+                    for ed in &mut e.additional {
+                        ed.range = text::range_from_wire(&text, ed.range, enc);
+                    }
+                }
+                e
+            }).collect();
+            this.update(cx, |s, _| s.note_completion(&path, pos.line, extras))?;
             for item in &mut items {
                 expand_snippet_item(item);
             }
@@ -918,6 +968,47 @@ impl LspStore {
                     lt::CompletionResponse::List(l)
                 }
             })
+        })
+    }
+
+    /// Remembers the extras of a completion response requested on `line`
+    /// (replaces the previous response's).
+    pub fn note_completion(&mut self, path: &Path, line: u32, items: Vec<CompletionExtra>) {
+        self.pending_completion = Some(PendingCompletion { path: path_key(path), line, at: Instant::now(), items });
+    }
+
+    /// The extras of a completion item the editor just inserted as
+    /// `inserted` on `line` of `path` (from the last response, once).
+    /// Single typed characters never match: a completion inserts a word.
+    pub fn take_completion(&mut self, path: &Path, line: u32, inserted: &str) -> Option<CompletionExtra> {
+        let p = self.pending_completion.as_ref()?;
+        if p.path != path_key(path) || p.line != line || p.at.elapsed() > PENDING_COMPLETION_TTL || inserted.chars().count() < 2 {
+            return None;
+        }
+        let hit = p.items.iter().find(|e| e.text == inserted)?.clone();
+        self.pending_completion = None;
+        Some(hit)
+    }
+
+    /// `completionItem/resolve` for an inserted item's `additionalTextEdits`
+    /// (editor columns).
+    pub fn resolve_additional_edits(&self, path: &Path, item: lt::CompletionItem, cx: &mut Context<Self>) -> Task<Result<Vec<lt::TextEdit>>> {
+        let (p, enc, _, _) = match self.request_target(path, lt::Position::default()) {
+            Ok(x) => x,
+            Err(e) => return Task::ready(Err(e)),
+        };
+        let fut = p.client.request_typed::<lt::request::ResolveCompletionItem>(item);
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let item = fut.await.map_err(|e| anyhow!("{e}"))?;
+            let mut edits = item.additional_text_edits.unwrap_or_default();
+            if enc != PosEncoding::Utf32 {
+                let text = this.update(cx, |s, _| s.text_for(&path).unwrap_or_default())?;
+                for e in &mut edits {
+                    e.range = text::range_from_wire(&text, e.range, enc);
+                }
+            }
+            Ok(edits)
         })
     }
 
@@ -1078,75 +1169,37 @@ const RESOLVE_WAIT: Duration = Duration::from_millis(250);
 
 /// LSP snippet to plain text: placeholders keep their default text, tab
 /// stops and `$0` vanish, choices take their first option, variables their
-/// default (`${TM_FILENAME:x}` is `x`). The editor has no snippet session,
-/// so the caret ends after the inserted text.
+/// default (`${TM_FILENAME:x}` is `x`). Tab stops: [`Snippet::parse`].
 pub fn expand_snippet(s: &str) -> String {
-    fn ident(chars: &[char], i: &mut usize) {
-        while *i < chars.len() && (chars[*i].is_ascii_alphanumeric() || chars[*i] == '_') {
-            *i += 1;
-        }
+    Snippet::parse(s).text
+}
+
+/// The text the editor inserts for `item` (gpui-component's order: the
+/// edit's text, else `insertText`, else the label).
+pub fn inserted_text(item: &lt::CompletionItem) -> &str {
+    match &item.text_edit {
+        Some(lt::CompletionTextEdit::Edit(e)) => &e.new_text,
+        Some(lt::CompletionTextEdit::InsertAndReplace(e)) => &e.new_text,
+        None => item.insert_text.as_deref().unwrap_or(&item.label),
     }
-    fn parse(chars: &[char], i: &mut usize, out: &mut String, in_brace: bool) {
-        while *i < chars.len() {
-            let c = chars[*i];
-            let next = chars.get(*i + 1).copied();
-            if c == '\\' && matches!(next, Some('$' | '}' | '\\' | ',' | '|')) {
-                out.push(next.unwrap_or('\\'));
-                *i += 2;
-            } else if in_brace && c == '}' {
-                *i += 1;
-                return;
-            } else if c == '$' && next.is_some_and(|n| n.is_ascii_alphanumeric() || n == '_') {
-                // `$1`, `$0`, `$TM_SELECTED_TEXT`: nothing to insert.
-                *i += 1;
-                ident(chars, i);
-            } else if c == '$' && next == Some('{') {
-                *i += 2;
-                ident(chars, i);
-                match chars.get(*i) {
-                    Some(':') => {
-                        *i += 1;
-                        parse(chars, i, out, true);
-                    }
-                    Some('|') => {
-                        *i += 1;
-                        let mut first = String::new();
-                        while *i < chars.len() && !matches!(chars[*i], ',' | '|') {
-                            if chars[*i] == '\\' && *i + 1 < chars.len() {
-                                *i += 1;
-                            }
-                            first.push(chars[*i]);
-                            *i += 1;
-                        }
-                        while *i < chars.len() && chars[*i] != '}' {
-                            *i += 1;
-                        }
-                        *i += 1;
-                        out.push_str(&first);
-                    }
-                    _ => {
-                        // `${1}` or a transform: skip to the matching brace.
-                        let mut depth = 1;
-                        while *i < chars.len() && depth > 0 {
-                            match chars[*i] {
-                                '{' => depth += 1,
-                                '}' => depth -= 1,
-                                _ => {}
-                            }
-                            *i += 1;
-                        }
-                    }
-                }
-            } else {
-                out.push(c);
-                *i += 1;
-            }
-        }
+}
+
+/// Snippet stops and auto-import edits of `item` (before it is made plain
+/// text), when it has any. `resolvable`: the server fills
+/// `additionalTextEdits` on `completionItem/resolve`.
+pub fn completion_extra(item: &lt::CompletionItem, resolvable: bool) -> Option<CompletionExtra> {
+    let snippet = (item.insert_text_format == Some(lt::InsertTextFormat::SNIPPET)).then(|| Snippet::parse(inserted_text(item))).filter(|s| !s.is_trivial());
+    let additional = item.additional_text_edits.clone().unwrap_or_default();
+    let resolve = (item.additional_text_edits.is_none() && resolvable && item.data.is_some()).then(|| item.clone());
+    if snippet.is_none() && additional.is_empty() && resolve.is_none() {
+        return None;
     }
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::new();
-    parse(&chars, &mut 0, &mut out, false);
-    out
+    let text = match &snippet {
+        Some(s) => s.text.clone(),
+        None if item.insert_text_format == Some(lt::InsertTextFormat::SNIPPET) => expand_snippet(inserted_text(item)),
+        None => inserted_text(item).to_string(),
+    };
+    Some(CompletionExtra { text, snippet, additional, resolve })
 }
 
 /// Makes a snippet item plain text (its insert text and its edit).
@@ -1228,6 +1281,37 @@ mod tests {
         let mut plain = lt::CompletionItem { label: "g".into(), insert_text: Some("g$1".into()), ..Default::default() };
         expand_snippet_item(&mut plain);
         assert_eq!(plain.insert_text.as_deref(), Some("g$1"), "plain-text items are left alone");
+    }
+
+    #[test]
+    fn completion_extras_match_the_inserted_text_once() {
+        let use_line = lt::TextEdit { range: lt::Range::new(lt::Position::new(0, 0), lt::Position::new(0, 0)), new_text: "use std::collections::HashMap;\n".into() };
+        let item = lt::CompletionItem {
+            label: "HashMap".into(),
+            insert_text: Some("HashMap::new($0)".into()),
+            insert_text_format: Some(lt::InsertTextFormat::SNIPPET),
+            additional_text_edits: Some(vec![use_line.clone()]),
+            ..Default::default()
+        };
+        let e = completion_extra(&item, false).expect("extra");
+        assert_eq!(e.text, "HashMap::new()");
+        assert_eq!(e.snippet.as_ref().map(|s| (s.stops.len(), s.stops[0].clone())), Some((1, 13..13)));
+        assert_eq!(e.additional, vec![use_line]);
+        // Nothing to do after inserting a plain word.
+        assert_eq!(completion_extra(&lt::CompletionItem { label: "len".into(), ..Default::default() }, true), None);
+        // Lazily resolved auto-import: keep the item for `completionItem/resolve`.
+        let lazy = lt::CompletionItem { label: "Rc".into(), data: Some(json!({"imports": 1})), ..Default::default() };
+        assert_eq!(completion_extra(&lazy, true).and_then(|e| e.resolve).map(|i| i.label), Some("Rc".into()));
+        assert_eq!(completion_extra(&lazy, false), None);
+
+        let mut st = LspStore::with_registry(PathBuf::from("C:/w"), ServerRegistry::default(), vec![]);
+        let file = Path::new("C:/w/src/main.rs");
+        st.note_completion(file, 4, vec![e.clone()]);
+        assert_eq!(st.take_completion(file, 3, "HashMap::new()"), None, "other line");
+        assert_eq!(st.take_completion(Path::new("C:/w/src/lib.rs"), 4, "HashMap::new()"), None, "other file");
+        assert_eq!(st.take_completion(file, 4, "H"), None, "typed character");
+        assert_eq!(st.take_completion(file, 4, "HashMap::new()"), Some(e));
+        assert_eq!(st.take_completion(file, 4, "HashMap::new()"), None, "only once");
     }
 
     /// Replaying ranged changes the way a server does (wire columns) gives

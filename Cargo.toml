@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pod-spike", "crates/podd", "crates/pod-cli", "crates/pod-status", "crates/pod-hook", "crates/pod-terminal-view", "crates/pod-app", "crates/diff-spike", "crates/pod-ui", "crates/pod-diff", "crates/pod-editor"]
+members = ["crates/pod-spike", "crates/podd", "crates/pod-cli", "crates/pod-status", "crates/pod-hook", "crates/pod-terminal-view", "crates/pod-app", "crates/diff-spike", "crates/pod-ui", "crates/pod-diff", "crates/pod-editor", "crates/pod-forge", "crates/pod-mods"]
 
 [patch.crates-io]
 # Apache-2.0 toolkit; accessibility fixes are recorded in vendor/gpui-component/POD-PATCHES.md.

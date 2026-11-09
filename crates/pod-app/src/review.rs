@@ -35,6 +35,7 @@ use pod_diff::{CONTEXT_LINES, ChangedFile, FileRow, SourceFile};
 use podd::protocol::{self as p, CommentState, DeliveryInfo, DeliveryState, NewComment, ReviewComment, Side, codes, orch_codes};
 use serde_json::json;
 
+use crate::qa_marks::QaId;
 use crate::source::{PoddSource, SourceError};
 use crate::vm::{AgentState, StatusVm, TaskVm};
 use crate::workspace::{ToastKind, Workspace};
@@ -307,6 +308,10 @@ pub struct ReviewPanel {
     refresh_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
+
+    /// P6: the pull request section (docs/15) and whether its tab is shown.
+    pr: Entity<crate::pr_panel::PrSection>,
+    pr_tab: bool,
 }
 
 impl ReviewPanel {
@@ -315,6 +320,7 @@ impl ReviewPanel {
         let instructions = cx
             .new(|cx| TextareaState::new(window, cx).auto_grow(2, 6).placeholder(crate::strings::OPTIONAL_INSTRUCTIONS_FOR_THE_AGENT_SENT_BEFORE_THE_COMMENTS));
         let state_subs = watch_state(&state, cx);
+        let pr = cx.new(|cx| crate::pr_panel::PrSection::new(source.clone(), workspace.clone(), task, cx));
         let mut this = Self {
             task_id: task.id.clone(),
             source,
@@ -358,6 +364,8 @@ impl ReviewPanel {
             refresh_task: None,
             poll_task: None,
             _subs: Vec::new(),
+            pr,
+            pr_tab: false,
         };
         this.refresh_diff(cx);
         this.reload_comments(cx);
@@ -374,6 +382,7 @@ impl ReviewPanel {
     /// The task list was re-read: worktree, agent terminal, and a git change
     /// (new commit / dirty count) triggers a diff refresh.
     pub fn set_task(&mut self, task: &TaskVm, cx: &mut Context<Self>) {
+        self.pr.update(cx, |p, cx| p.set_task(task, cx));
         self.worktree = task.worktree.clone();
         self.agent_terminal = task.terminals.first().cloned();
         let sig = git_signature(task);
@@ -1084,7 +1093,81 @@ impl ReviewPanel {
             )
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// "코멘트 | PR" switch at the top of the sidebar (P6).
+    fn render_sidebar_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tab = |id: &'static str, label: &'static str, tip: &'static str, on: bool, pr: bool, cx: &mut Context<Self>| {
+            Button::new(id)
+                .label(label)
+                .xsmall()
+                .tooltip(tip)
+                .when(on, |b| b.primary())
+                .when(!on, |b| b.ghost())
+                .on_click(cx.listener(move |p, _, _, cx| p.set_pr_tab(pr, cx)))
+        };
+        let pr_label = self.pr.read(cx).info().and_then(|i| i.status.pr.as_ref()).map(|p| format!("#{}", p.number));
+        div()
+            .qa_id(|| "review-sidebar-tabs".into())
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pt_1()
+            .child(tab("rv-tab-comments", crate::pr_panel::s::TAB_COMMENTS, crate::pr_panel::s::TAB_COMMENTS_TIP, !self.pr_tab, false, cx))
+            .child(tab("rv-tab-pr", crate::pr_panel::s::TAB_PR, crate::pr_panel::s::TAB_PR_TIP, self.pr_tab, true, cx))
+            .when_some(pr_label, |d, l| d.child(div().text_xs().text_color(rgb(color::muted())).child(l)))
+            .into_any_element()
+    }
+
+    /// Show or hide the file list (fixture scenes).
+    pub fn set_file_list(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_files = show;
+        self.relayout(cx);
+    }
+
+    fn set_pr_tab(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.pr_tab = on;
+        self.pr.update(cx, |p, cx| p.set_visible(on, cx));
+        cx.notify();
+    }
+
+    /// Show the PR tab (and the sidebar); orm opens the create form when
+    /// the task has no pull request yet (workspace open_pr).
+    pub fn show_pr(&mut self, form: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_comments {
+            self.show_comments = true;
+            self.relayout(cx);
+        }
+        self.set_pr_tab(true, cx);
+        if form {
+            self.pr.update(cx, |p, cx| {
+                if p.info().is_none_or(|i| i.status.pr.is_none()) {
+                    p.open_form(window, cx);
+                }
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pr_section(&self) -> Entity<crate::pr_panel::PrSection> {
+        self.pr.clone()
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.render_sidebar_tabs(cx);
+        if self.pr_tab {
+            return div()
+                .w(px(340.))
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(color::pane()))
+                .border_l_1()
+                .border_color(rgb(color::border()))
+                .child(tabs)
+                .child(div().flex_1().min_h_0().child(self.pr.clone()))
+                .into_any_element();
+        }
         let visible: Vec<ReviewComment> = self.comments.iter().filter(|c| self.show_resolved || c.state != CommentState::Resolved).cloned().collect();
         let resolved = self.comments.iter().filter(|c| c.state == CommentState::Resolved).count();
         let selection = send_selection(&self.comments, &self.checked);
@@ -1176,6 +1259,7 @@ impl ReviewPanel {
             .bg(rgb(color::pane()))
             .border_l_1()
             .border_color(rgb(color::border()))
+            .child(tabs)
             .child(
                 div()
                     .flex()
@@ -1226,6 +1310,7 @@ impl ReviewPanel {
                     .when_some(outcome, |d, (t, col)| d.child(div().text_xs().text_color(rgb(col)).child(t)))
                     .children(deliveries),
             )
+            .into_any_element()
     }
 
     fn render_diff(&self, cx: &mut Context<Self>) -> Diff {

@@ -87,6 +87,8 @@ impl Harness {
 
     fn build(name: &'static str, scale: f32, logical: Size<Pixels>, options: StartOptions, seed: impl FnOnce(&mut TestBackend)) -> Self {
         isolate_config();
+        // Toolkit dialogs report their surface as `dialog-<layer>` (vendor patch).
+        gpui_kit::component::dialog::set_dialog_bounds_observer(Some(|layer, bounds| crate::qa_marks::record(format!("dialog-{layer}"), bounds)));
         let dispatcher = TestDispatcher::new(0);
         let app = TestAppContext::build_with_text_system(dispatcher, Some("native_qa"), TEXT_SYSTEM.with(Arc::clone));
         app.update(|cx| {
@@ -132,6 +134,8 @@ impl Harness {
                 break;
             }
         }
+        // Full-refresh frame (no view cache): `qa_marks` holds exactly what it painted.
+        crate::qa_marks::clear();
         self.cx.update(|window, cx| {
             window.refresh();
             let _ = window.draw(cx);
@@ -298,10 +302,11 @@ impl Harness {
         self.cx.update(|window, _| window.context_stack().iter().filter_map(|c| c.primary().map(|e| e.key.to_string())).collect::<Vec<_>>().join(" > "))
     }
 
-    /// Bounds recorded by `debug_selector` in the last frame.
+    /// Bounds of the element marked `qa_id(selector)` in the last settled frame.
+    /// (Not GPUI's `debug_bounds`: that is compiled out without `debug_assertions`,
+    /// so it failed every lookup under `cargo test --release`.)
     pub fn bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
-        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
-        self.cx.debug_bounds(selector)
+        crate::qa_marks::bounds(selector)
     }
 
     pub fn viewport(&mut self) -> Size<Pixels> {
@@ -1106,4 +1111,63 @@ fn g_task_removing_saves_unsaved_edits_or_closes_a_clean_editor() {
     let _ = h.backend.events.unbounded_send(crate::source::SourceEvent::TaskRemoving { id: "sample/links".into(), worktree: wt.clone() });
     h.settle();
     assert!(!open(&mut h), "clean editor closed before the worktree goes");
+}
+
+/// A snippet completion with an auto-import, inserted the way the
+/// completion menu does (`insert_completion`): the import lands above, the
+/// first placeholder is selected, Tab / Shift+Tab walk the stops, typing
+/// replaces a placeholder, and Esc ends the session (Tab indents again).
+#[test]
+fn g_snippet_completion_tab_stops_and_auto_import() {
+    use pod_editor::lsp::types as lt;
+    let (_dir, wt) = link_worktree();
+    let mut h = Harness::new("g-snippet", |b| seed_link_task(b, &wt));
+    let ed = open_notes(&mut h);
+    let item = lt::CompletionItem {
+        label: "pair".into(),
+        insert_text: Some("pair(${1:left}, ${2:right})$0".into()),
+        insert_text_format: Some(lt::InsertTextFormat::SNIPPET),
+        additional_text_edits: Some(vec![lt::TextEdit { range: lt::Range::default(), new_text: "use pairs::pair;\n".into() }]),
+        ..Default::default()
+    };
+    let extra = pod_editor::lsp::store::completion_extra(&item, false).expect("extra");
+    let mut shown = item.clone();
+    pod_editor::lsp::store::expand_snippet_item(&mut shown);
+    let state = h.cx.update(|_, cx| ed.read(cx).active_editor()).expect("editor state");
+    h.cx.update(|window, cx| {
+        let path = ed.read(cx).active_path().expect("path").to_path_buf();
+        let lsp = ed.read(cx).lsp().clone();
+        lsp.update(cx, |s, _| s.note_completion(&path, 0, vec![extra]));
+        state.update(cx, |s, cx| s.insert_completion(&shown, 0..0, window, cx));
+    });
+    h.settle();
+    let read = |h: &mut Harness| {
+        h.cx.update(|_, cx| {
+            let s = state.read(cx);
+            let text = s.value().to_string();
+            let sel = s.selected_range();
+            (text.clone(), text[sel].to_string(), ed.read(cx).snippet_active())
+        })
+    };
+    let (text, selected, active) = read(&mut h);
+    h.log(&format!("after insert: selected {selected:?}"));
+    assert!(text.starts_with("use pairs::pair;\npair(left, right)"), "{text:?}");
+    assert_eq!((selected.as_str(), active), ("left", true), "first placeholder selected");
+    // Focus the code editor so keys go through its bindings (Tab = IndentInline).
+    h.cx.update(|window, cx| state.update(cx, |s, cx| s.focus(window, cx)));
+    h.keys("tab");
+    assert_eq!(read(&mut h).1, "right");
+    h.keys("shift-tab");
+    assert_eq!(read(&mut h).1, "left");
+    h.type_text("a");
+    let (text, _, active) = read(&mut h);
+    assert!(text.starts_with("use pairs::pair;\npair(a, right)"), "typing replaced the placeholder: {text:?}");
+    assert!(active);
+    h.keys("tab");
+    assert_eq!(read(&mut h).1, "right");
+    h.keys("escape");
+    assert!(!read(&mut h).2, "Esc ends the session");
+    let before = read(&mut h).0;
+    h.keys("tab");
+    assert_ne!(read(&mut h).0, before, "Tab edits (indents) again after the session");
 }

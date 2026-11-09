@@ -1,0 +1,15 @@
+[package]
+name = "pod-forge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Forge (GitHub) operations for Pod tasks: detect the remote, push, pull requests and checks through the gh CLI, plus a fake forge for tests"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+
+[lints]
+workspace = true

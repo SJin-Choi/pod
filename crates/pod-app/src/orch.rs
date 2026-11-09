@@ -168,6 +168,7 @@ pub fn status_badge(s: Option<&StatusVm>) -> StatusBadge {
         Some("hook") => Some(Source::Hook),
         Some("osc") => Some(Source::Osc),
         Some("heuristic") => Some(Source::Heuristic),
+        Some("mod") => Some(Source::Mod),
         Some("process") => Some(Source::Process),
         _ => None,
     };

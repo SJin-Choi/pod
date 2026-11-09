@@ -231,12 +231,14 @@ GPUI 채택으로 UI 단계가 길어짐. 대신 **P0와 UI 스파이크를 병�
 | 완료 | 수동 확인 자동화: 앱 내부 테스트로 키보드만 조작·Esc 포커스 복귀·Tab 순서·한글 IME 5곳·배율 1.0~1.75 확인, UI Automation 13화면 이름 누락 0, OS 고대비 감지 추가, 접근성 버그 9건 수정(시작 시 포커스 없음, Enter 제출 안 됨 등) → master `a5614d6`, Shift+Tab 수정 `97c0909` (테스트 339). 잠금 때문에 미실행: 실제 키 입력·내레이터 음성·IME 후보 창·실제 125/175% | 검증 | — |
 | 완료 | 설치 패키지: 사용자 단위 Inno Setup 설치 파일(12.2MB, 한국어 화면)과 휴대용 zip, 업그레이드해도 실행 중 터미널 유지, 터미널 열려 있으면 제거 거부, 훅은 제안만, 469개 crate 고지(GPL 없음), 버전 0.1.0 통일 → master `40f1b10`, `docs/14`. 남은 것: 코드 서명, 앱 아이콘, exe 버전 정보, 앱 안 훅 설치 안내 | 배포 | — |
 | 완료 | 후속 1 앱: 터미널 경로·URL Ctrl+클릭(팔레트로도), 훅 설치 안내(미리보기·확인 후에만 설치), 터미널에 Ctrl+P/K 보내기, LSP 상태 메뉴, 편집기 자동 완성 상세·스니펫·코드 액션·증분 동기화, 변경 이벤트 구독(폴링은 느린 예비만), 저장 시 task.touch, 작업 삭제 전 편집기 저장/닫기 → master `9667298` (테스트 374) | 후속 | — |
-| 진행 중 | 작은 후속 (Claude, small-fixes): 터미널 한글(넓은 글자) 사이 간격이 넓어 보임, 파일별 독립 탭, 스니펫 탭 이동, 코드 액션 실제 rust-analyzer 확인, release 빌드에서 native QA 테스트 실행 | 후속 | — |
+| 완료 | 작은 후속 (Claude, small-fixes): 터미널 넓은 글자를 2칸에 맞춰 그림(Windows Terminal과 비교), 넓은 글자 선택·커서; release에서 native QA(테스트 전용 경계 기록 `qa_id`); doctest 255는 재현 안 됨(바깥 강제 종료로 판단, 기록); 스니펫 탭 이동·자동 import·`workspace/applyEdit`, 실제 rust-analyzer로 코드 액션 확인; 파일별 독립 탭은 설계 메모만 → 브랜치 `SJin-Choi/small-fixes` (docs/09 §13) | 후속 | — |
 | 완료 | 후속 2 아이콘: 독자 아이콘 "터미널 칸"(시안 3개 중 선택, 16~256px 9개 크기 손질), 실행 파일 5개 버전 정보·아이콘, 창·작업 표시줄 아이콘, 설치 파일 아이콘(설치 시험 63/63) → master `c249ca2` | 후속 | — |
 | 완료 | 후속 3 데몬: 프로토콜 v9 — 여러 앱의 색 응답 중복 제거와 0.5초 넘은 늦은 응답 차단, 변경 이벤트(terminal/task.changed, task.removing, task.touch), `pod hooks uninstall`(백업, 다른 도구 훅 보존), `pod-hook --version` → master `1f1a9cb` (테스트 347). 앱이 이벤트로 바꾸는 것은 후속 1에 추가 | 후속 | — |
-| 진행 중 | P6-1 GitHub 연동 (Claude, p6-pr): `pod-forge` 크레이트(gh CLI), 작업 브랜치 푸시·PR 만들기·상태·체크·병합, 앱 PR 섹션 — 실제 저장소 결정 전까지 가짜 응답으로 개발, GitHub 쓰기 없음 | P6 | — |
-| 진행 중 | P6-2 확장 (Claude, p6-ext): QuickJS(rquickjs) 샌드박스 모드, 이벤트·권한·CPU/메모리 제한, 사용자 상태 감지기, 레이아웃 프리셋, 설정 "확장" 화면 → `docs/16` | P6 | — |
-| 진행 중 | P6-3 공개 준비 (사용자 결정 2026-11-09: 공개 저장소 SJin-Choi/pod, 역분석 내용 제외, 새 이력으로 공개): 문서 정리 워커 public-sanitize → 검토 후 main에 올림. 이후 코드 서명(SignPath Foundation) | P6 | — |
+| 완료 | P6-1 GitHub 연동: `pod-forge`(gh CLI, 가짜 forge로 시험), 프로토콜 v10 task.pr.status/create/merge, `pod pr create/status/merge/open`, 리뷰의 PR 탭(원격 없음 안내, 제목·본문 미리 채움, 상태·리뷰·체크, 병합 방식 선택·확인, 그룹 우승자 PR) → master `4f4e6aa` (테스트 414). 실제 GitHub 쓰기 검증은 남음(`docs/15` §7) | P6 | — |
+| 진행 중 | P6-1 실제 저장소 검증 (Claude, pr-e2e, 사용자 승인 2026-11-09: 시험 전용 비공개 저장소 SJin-Choi/pod-pr-e2e-*): 푸시·PR·Actions 체크·병합·오류 경로, 끝나면 삭제(권한 없으면 보관 후 사용자 삭제) | P6 | — |
+| 완료 | P6-2 확장: `pod-mods`(rquickjs 샌드박스, 메모리 16MiB·CPU 시간 제한, 권한·작업 범위 검사), podd 안에서 실행(프로토콜 v11 mod.*), 상태 출처 mod(hook > osc > mod > heuristic), 설정 "확장" 화면, 예제(Aider 상태 감지·그룹 완료 알림·레이아웃 프리셋) → master `0685f35` (테스트 447). 남은 것: setTimeout, 실제 클릭으로 레이아웃 적용 확인, OS 알림 | P6 | — |
+| 완료 | P6-3 공개: 역분석 내용을 private/(git 제외)로 옮기고 README·CONTRIBUTING·SECURITY 추가 → 공개 저장소 https://github.com/SJin-Choi/pod `main`(새 이력 1커밋, GitHub noreply 작성자). 이후 공개는 `tools/publish-public.ps1`(검사 후 master 트리를 main에 한 커밋으로) — master 이력은 비공개 유지 | P6 | — |
+| 대기 | P6-5 코드 서명: SignPath Foundation 오픈소스 신청(사용자 본인 신청 필요), 승인 후 GitHub Actions에서 설치 파일 서명 | P6 | 사용자 |
 | 나중 | P6-4 SSH 원격(다른 기기의 podd), WSL(설치는 사용자 몫), 모바일 승인 화면(웹) | P6 | — |
 
 ### 참고 출처

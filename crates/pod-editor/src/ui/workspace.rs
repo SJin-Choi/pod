@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui_kit::base::input::Diagnostic as EditorDiagnostic;
-use gpui_kit::component::input::{Editor, EditorState, GoToDefinition, Input, InputEditsEvent, InputEvent, InputState, Rope, RopeExt as _, ShowCompletions, ShowDocumentHandler};
+use gpui_kit::component::input::{Editor, EditorState, Escape, GoToDefinition, IndentInline, Input, InputEditsEvent, InputEvent, InputState, OutdentInline, Rope, RopeExt as _, ShowCompletions, ShowDocumentHandler};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,9 @@ use super::strings as txt;
 use crate::git::{self, GitMark};
 use crate::index::{self, IndexSnapshot, Recents};
 use crate::lsp::providers::LspBridge;
+use crate::lsp::snippet::{self, SnippetSession};
 use crate::lsp::store::apply_edits;
-use crate::lsp::{FileEdit, Language, Location, LspStore, LspStoreEvent, ServerState, language_for_path};
+use crate::lsp::{CompletionExtra, FileEdit, Language, Location, LspStore, LspStoreEvent, ServerState, language_for_path};
 use crate::text::{self, LineEnding};
 use crate::tree::{FileTree, TreeAction};
 use crate::uri::{path_key, simplify, uri_to_path};
@@ -141,6 +142,8 @@ struct Buffer {
     /// Registered with the language server (done on first activation, so
     /// restored background tabs never start a server).
     lsp_open: bool,
+    /// Tab stops of the last inserted snippet completion (Tab / Shift+Tab / Esc).
+    snippet: Option<SnippetSession>,
     _subs: Vec<Subscription>,
     _sync: Task<()>,
 }
@@ -207,6 +210,31 @@ impl Focusable for EditorWorkspace {
     }
 }
 
+/// Applies editor-column edits to an open buffer as undoable ranged
+/// replacements (back to front), so the edits reach the language server
+/// incrementally and the caret keeps its place in the text around them.
+fn edit_buffer(state: &Entity<EditorState>, edits: &[lt::TextEdit], window: &mut Window, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        let text = s.text().clone();
+        let mut ranges: Vec<(std::ops::Range<usize>, &str)> = edits
+            .iter()
+            .map(|e| {
+                let a = text.position_to_offset(&e.range.start);
+                (a..text.position_to_offset(&e.range.end).max(a), e.new_text.as_str())
+            })
+            .collect();
+        ranges.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        let caret = s.cursor();
+        let moved: isize = ranges.iter().filter(|(r, _)| r.end <= caret).map(|(r, t)| t.len() as isize - r.len() as isize).sum();
+        for (r, t) in ranges {
+            s.set_selected_range(r, cx);
+            s.replace(t.to_string(), window, cx);
+        }
+        let caret = (caret as isize + moved).max(0) as usize;
+        s.set_selected_range(caret..caret, cx);
+    });
+}
+
 fn rel_of(root: &Path, path: &Path) -> String {
     let r = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
     if cfg!(windows) { r.replace('\\', "/") } else { r }
@@ -219,6 +247,14 @@ impl EditorWorkspace {
         let sub = cx.subscribe_in(&lsp, window, |this: &mut Self, _, ev: &LspStoreEvent, window, cx| match ev {
             LspStoreEvent::DiagnosticsChanged(p) => this.apply_diagnostics(p, window, cx),
             LspStoreEvent::ServersChanged => cx.notify(),
+            LspStoreEvent::ApplyEdit { label, edits, reply } => {
+                // A server-driven edit (`workspace/applyEdit`, e.g. a code action's command).
+                let wanted = edits.len();
+                let n = this.apply_file_edits(edits.clone(), window, cx);
+                reply.send(n == wanted);
+                let what = label.as_deref().unwrap_or("언어 서버 편집");
+                this.flash(format!("{what}: 파일 {n}개를 고쳤습니다 (저장 전)"), n != wanted, cx);
+            }
         });
         let mut ws = EditorWorkspace {
             tree: FileTree::new(root.clone()),
@@ -519,12 +555,19 @@ impl EditorWorkspace {
         });
         // Incremental sync: each edit goes to the store as a ranged change
         // (the debounced full-text sync below stays as a repair path).
+        // The same edits keep a snippet session's stops in place, and an
+        // inserted completion picks up its tab stops and auto-imports.
         let p3 = path.to_path_buf();
         let lsp = self.lsp.clone();
-        let edits = cx.subscribe(&state, move |_, _, ev: &InputEditsEvent, cx| {
+        let edits = cx.subscribe_in(&state, window, move |this: &mut Self, state, ev: &InputEditsEvent, window, cx| {
             for (e, after) in ev.edits() {
                 let new_text = after.slice(e.start_byte..e.new_end_byte).to_string();
                 lsp.update(cx, |s, _| s.edit_document(&p3, e.start_byte, e.old_end_byte, &new_text));
+                this.track_snippet(&p3, snippet::Edit { start: e.start_byte, old_end: e.old_end_byte, new_end: e.new_end_byte });
+                let line = after.offset_to_position(e.start_byte).line;
+                if let Some(extra) = lsp.update(cx, |s, _| s.take_completion(&p3, line, &new_text)) {
+                    this.after_completion(&p3, state.clone(), e.start_byte, extra, window, cx);
+                }
             }
         });
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
@@ -541,6 +584,7 @@ impl EditorWorkspace {
             disk: DiskState::Same,
             lsp_open: false,
             _subs: vec![change, edits, observe],
+            snippet: None,
             _sync: Task::ready(()),
         };
         // Diagnostics that arrived before the tab existed.
@@ -986,12 +1030,7 @@ impl EditorWorkspace {
             }
             let Some(i) = self.find_buffer(&fe.path) else { continue };
             let st = self.buffers[i].state.clone();
-            let new_text = apply_edits(&st.read(cx).value(), &fe.edits);
-            st.update(cx, |s, cx| {
-                let pos = s.cursor_position();
-                s.set_value(new_text, window, cx);
-                s.set_cursor_position(pos, window, cx);
-            });
+            edit_buffer(&st, &fe.edits, window, cx);
             self.on_buffer_changed(&fe.path, window, cx);
             changed += 1;
         }
@@ -1001,6 +1040,90 @@ impl EditorWorkspace {
             }
         cx.notify();
         changed
+    }
+
+    /// Moves a snippet session's stops with an edit; ends it when the edit
+    /// cuts across a stop.
+    fn track_snippet(&mut self, path: &Path, edit: snippet::Edit) {
+        if let Some(i) = self.find_buffer(path)
+            && let Some(s) = self.buffers[i].snippet.as_mut()
+            && !s.apply(edit)
+        {
+            self.buffers[i].snippet = None;
+        }
+    }
+
+    /// A completion item was just inserted at byte `at`: start its tab-stop
+    /// session and add its auto-imports (`additionalTextEdits`, resolved
+    /// now if the server sends them lazily).
+    fn after_completion(&mut self, path: &Path, state: Entity<EditorState>, at: usize, extra: CompletionExtra, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.find_buffer(path) else { return };
+        self.buffers[i].snippet = extra.snippet.as_ref().and_then(|s| SnippetSession::new(s, at));
+        if !extra.additional.is_empty() {
+            // Edits above the insertion shift the session through `track_snippet`.
+            edit_buffer(&state, &extra.additional, window, cx);
+        } else if let Some(item) = extra.resolve {
+            let task = self.lsp.update(cx, |s, cx| s.resolve_additional_edits(path, item, cx));
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(edits) = task.await
+                    && !edits.is_empty()
+                {
+                    let _ = this.update_in(cx, |_, window, cx| edit_buffer(&state, &edits, window, cx));
+                }
+            })
+            .detach();
+        }
+        if self.buffers[i].snippet.is_some() {
+            // After the queued edit events (auto-import) have moved the stops.
+            let ws = cx.entity().downgrade();
+            let p = path.to_path_buf();
+            window.defer(cx, move |_, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.select_snippet_stop(&p, cx));
+            });
+        }
+    }
+
+    /// Selects the session's current stop; the final stop (`$0`) only
+    /// places the caret and ends the session.
+    fn select_snippet_stop(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(i) = self.find_buffer(path) else { return };
+        let Some(s) = &self.buffers[i].snippet else { return };
+        let (range, last) = (s.current_range(), s.at_last());
+        self.buffers[i].state.update(cx, |st, cx| st.set_selected_range(range, cx));
+        if last {
+            self.buffers[i].snippet = None;
+        }
+        cx.notify();
+    }
+
+    /// Tab / Shift+Tab inside a snippet session: next / previous stop.
+    /// `false` (the key does its usual indent) when there is no session, a
+    /// completion menu is open, or the caret has left the current stop.
+    fn snippet_step(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(i) = self.active else { return false };
+        let st = self.buffers[i].state.read(cx);
+        let (menu_open, sel) = (st.completion_menu_state().open, st.selected_range());
+        let Some(s) = self.buffers[i].snippet.as_mut() else { return false };
+        if menu_open {
+            return false;
+        }
+        let cur = s.current_range();
+        if sel.start < cur.start || sel.end > cur.end {
+            self.buffers[i].snippet = None;
+            return false;
+        }
+        if s.step(forward).is_none() {
+            self.buffers[i].snippet = None;
+            return false;
+        }
+        let path = self.buffers[i].path.clone();
+        self.select_snippet_stop(&path, cx);
+        true
+    }
+
+    /// Whether the active tab has a snippet session (tests, status).
+    pub fn snippet_active(&self) -> bool {
+        self.active.and_then(|i| self.buffers.get(i)).is_some_and(|b| b.snippet.is_some())
     }
 
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2008,6 +2131,27 @@ impl Render for EditorWorkspace {
             .id("pod-editor")
             .key_context(CTX)
             .track_focus(&self.focus)
+            // Capture phase: before the editor's own Tab (indent) / Esc.
+            .capture_action(cx.listener(|this, _: &IndentInline, _, cx| {
+                if this.snippet_step(true, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &OutdentInline, _, cx| {
+                if this.snippet_step(false, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                // Esc ends the session; a completion menu still closes first.
+                if let Some(i) = this.active
+                    && this.buffers[i].snippet.is_some()
+                    && !this.buffers[i].state.read(cx).completion_menu_state().open
+                {
+                    this.buffers[i].snippet = None;
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(Self::on_quick_open))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_all))

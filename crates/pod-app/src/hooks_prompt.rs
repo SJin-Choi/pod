@@ -29,6 +29,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::Deserialize;
 
+use crate::qa_marks::QaId;
 use crate::workspace::{ToastKind, Workspace};
 
 /// `pod hooks …` as the app needs it. Implementations run on a background thread.
@@ -387,8 +388,8 @@ impl Workspace {
                     .flex()
                     .gap_2()
                     .justify_end()
-                    .child(div().debug_selector(|| "hooks-cancel".into()).child(Button::new("hooks-cancel").label(crate::strings::CANCEL).on_click(|_, window, cx| window.close_dialog(cx))))
-                    .child(div().debug_selector(|| "hooks-confirm".into()).child(Button::new("hooks-confirm").label(crate::strings::HOOKS_INSTALL_CONFIRM).primary().on_click(move |_, window, cx| {
+                    .child(div().qa_id(|| "hooks-cancel".into()).child(Button::new("hooks-cancel").label(crate::strings::CANCEL).on_click(|_, window, cx| window.close_dialog(cx))))
+                    .child(div().qa_id(|| "hooks-confirm".into()).child(Button::new("hooks-confirm").label(crate::strings::HOOKS_INSTALL_CONFIRM).primary().on_click(move |_, window, cx| {
                         window.close_dialog(cx);
                         let _ = ws.update(cx, |w, cx| w.run_hook_install(window, cx));
                     }))),
@@ -434,7 +435,7 @@ impl Workspace {
         Some(
             div()
                 .id("hooks-banner")
-                .debug_selector(|| "hooks-banner".into())
+                .qa_id(|| "hooks-banner".into())
                 .role(Role::Alert)
                 .aria_label(format!("{title}. {detail}"))
                 .px_3()
@@ -454,7 +455,7 @@ impl Workspace {
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_primary)).child(title))
                         .child(div().text_xs().text_color(rgb(t.text_secondary)).truncate().child(detail)),
                 )
-                .child(div().debug_selector(|| "hooks-install".into()).child(
+                .child(div().qa_id(|| "hooks-install".into()).child(
                     Button::new("hooks-install")
                         .label(if busy { crate::strings::HOOKS_CHECKING } else { crate::strings::HOOKS_INSTALL })
                         .tooltip(crate::strings::HOOKS_INSTALL_TOOLTIP)
@@ -463,7 +464,7 @@ impl Workspace {
                         .disabled(busy)
                         .on_click(cx.listener(|w, _, window, cx| w.request_hook_install(window, cx))),
                 ))
-                .child(div().debug_selector(|| "hooks-later".into()).child(
+                .child(div().qa_id(|| "hooks-later".into()).child(
                     Button::new("hooks-later")
                         .label(crate::strings::HOOKS_LATER)
                         .tooltip(crate::strings::HOOKS_LATER_TOOLTIP)
