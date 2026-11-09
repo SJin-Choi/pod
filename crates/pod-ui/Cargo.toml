@@ -1,0 +1,13 @@
+﻿[package]
+name = "pod-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit = "=0.9.0"
+pod-status = { path = "../pod-status" }
+
+[lints]
+workspace = true

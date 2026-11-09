@@ -1,0 +1,59 @@
+[package]
+name = "pod-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Pod P3 editing: worktree file tree, quick open, code editor tabs and an LSP client"
+
+autobins = false
+
+[[bin]]
+name = "pod-editor-demo"
+path = "src/bin/pod-editor-demo.rs"
+
+# Scripted language server for the LSP lifecycle tests (not shipped).
+[[bin]]
+name = "pod-editor-fake-lsp"
+path = "src/bin/fake_lsp.rs"
+
+[dependencies]
+# Apache-2.0. The grammar features turn on gpui-component's Tree-sitter
+# highlighter for these languages (JSON comes with the base `tree-sitter`
+# feature). The grammars themselves are MIT.
+gpui-kit = { version = "=0.9.0", features = [
+    "tree-sitter-rust",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-python",
+    "tree-sitter-toml",
+    "tree-sitter-markdown",
+] }
+pod-ui = { path = "../pod-ui" }
+# MIT. Same version gpui-component's editor providers are written against.
+lsp-types = "0.97"
+# MIT/Apache-2.0
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+# Unlicense OR MIT: .gitignore-aware walking (ripgrep's walker)
+ignore = "0.4"
+# CC0-1.0: file watching (ReadDirectoryChangesW on Windows)
+notify = "8"
+
+[target.'cfg(windows)'.dependencies]
+# MIT/Apache-2.0: Job Object so a language server's whole process tree dies with it
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
